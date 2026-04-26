@@ -1,0 +1,459 @@
+#!/usr/bin/env bash
+# Usage:
+#   ~/list-iterms                  # YAML inventory of every iTerm2 session
+#   ~/list-iterms json             # flat JSON array (one entry per session) for chooser UIs
+#   ~/list-iterms focus <uid>      # bring the session with that unique-id to front
+#
+# Each session in the YAML carries `session_uid` (stable across reorders) and
+# `iterm_window_id` (iTerm's own window id). For tmux -CC virtual sessions the
+# uid still works — iTerm mirrors tmux panes 1:1 as sessions, so focusing the
+# iTerm session focuses the matching remote tmux pane.
+
+set -u
+
+# ---------- focus subcommand ----------
+if [ "${1-}" = "focus" ] && [ -n "${2-}" ]; then
+  uid=$2
+  osascript - "$uid" <<'APPLESCRIPT'
+on run argv
+  set targetUid to item 1 of argv
+  tell application "iTerm2"
+    repeat with w in windows
+      repeat with t in tabs of w
+        repeat with s in sessions of t
+          if (unique id of s) is targetUid then
+            select s
+            tell t to select
+            tell w to select
+            activate
+            return "focused " & targetUid
+          end if
+        end repeat
+      end repeat
+    end repeat
+    return "not found: " & targetUid
+  end tell
+end run
+APPLESCRIPT
+  exit 0
+fi
+
+# ---------- collect raw session data once ----------
+collect() {
+  osascript <<'APPLESCRIPT'
+tell application "iTerm2"
+  set out to ""
+  set wIdx to 0
+  repeat with w in windows
+    set wIdx to wIdx + 1
+    set wid to id of w
+    set tIdx to 0
+    repeat with t in tabs of w
+      set tIdx to tIdx + 1
+      set sIdx to 0
+      repeat with s in sessions of t
+        set sIdx to sIdx + 1
+        set sTty to ""
+        try
+          set sTty to (tty of s) as string
+        end try
+        set out to out & wIdx & "|" & wid & "|" & tIdx & "|" & sIdx & "|" & (unique id of s) & "|" & sTty & "|" & (name of s) & linefeed
+      end repeat
+    end repeat
+  end repeat
+  return out
+end tell
+APPLESCRIPT
+}
+
+# Batched: returns RS-separated records of <uid><US><visible_text>
+# Saves ~50% vs N separate osascript calls.
+collect_texts() {
+  osascript <<'APPLESCRIPT'
+set rs to (ASCII character 30)
+set us to (ASCII character 31)
+set out to ""
+tell application "iTerm2"
+  repeat with w in windows
+    repeat with t in tabs of w
+      repeat with s in sessions of t
+        set sUid to (unique id of s) as string
+        set sText to ""
+        try
+          set sText to text of s
+        end try
+        set out to out & sUid & us & sText & rs
+      end repeat
+    end repeat
+  end repeat
+end tell
+return out
+APPLESCRIPT
+}
+
+# given a tty basename, echo "cwd|ssh_host|ssh_is_cc|interesting_cmd|agent|cpu"
+#   agent: claude | codex | "" (which agent runs in this session, if any)
+#   cpu:   sum of %CPU of agent process + descendants (rough activity score)
+inspect_tty() {
+  local ttyname=$1
+  local fg_pid cwd ssh_proc host is_cc interesting agent cpu agent_pid
+  fg_pid=$(ps -t "$ttyname" -o pid=,stat= 2>/dev/null | awk '$2 ~ /\+/ {print $1; exit}')
+  [ -z "$fg_pid" ] && fg_pid=$(ps -t "$ttyname" -o pid= 2>/dev/null | awk 'NF{p=$1} END{print p}')
+  cwd=""
+  if [ -n "$fg_pid" ]; then
+    cwd=$(lsof -a -d cwd -p "$fg_pid" -Fn 2>/dev/null | awk '/^n/{print substr($0,2); exit}')
+  fi
+  ssh_proc=$(ps -t "$ttyname" -o command= 2>/dev/null \
+              | grep -E '(^| )ssh ([^-]|-[^V])' | grep -v grep | head -1)
+  host=""; is_cc="false"
+  if [ -n "$ssh_proc" ]; then
+    host=$(echo "$ssh_proc" | awk '{for(i=2;i<=NF;i++) if($i!~/^-/ && $i!="tmux"){print $i; exit}}')
+    echo "$ssh_proc" | grep -q -- '-CC' && is_cc="true"
+  fi
+  interesting=$(ps -t "$ttyname" -o command= 2>/dev/null \
+    | grep -Ev '^(login|-?bash|-?zsh|-?sh|caffeinate)( |$)' \
+    | grep -Ev '^/.*Python.*interactive-bash' \
+    | head -1)
+
+  # detect agent + activity (CPU summed across agent pid and its descendants)
+  agent=""; cpu=0; agent_pid=""
+  agent_pid=$(ps -t "$ttyname" -o pid=,command= 2>/dev/null \
+              | awk '/[ \/]claude( |$)/ {print $1; exit}')
+  [ -n "$agent_pid" ] && agent="claude"
+  if [ -z "$agent_pid" ]; then
+    agent_pid=$(ps -t "$ttyname" -o pid=,command= 2>/dev/null \
+                | awk '/[ \/]codex( |$)/ {print $1; exit}')
+    [ -n "$agent_pid" ] && agent="codex"
+  fi
+  if [ -n "$agent_pid" ]; then
+    # gather agent_pid + all descendants, sum %CPU
+    cpu=$(python3 - "$agent_pid" <<'PY'
+import os, sys, subprocess
+root = int(sys.argv[1])
+out = subprocess.run(["ps","-axo","pid=,ppid=,pcpu="], capture_output=True, text=True).stdout
+ppid_of, cpu_of = {}, {}
+for line in out.splitlines():
+    parts = line.split(None, 2)
+    if len(parts) < 3: continue
+    pid, ppid, pcpu = int(parts[0]), int(parts[1]), float(parts[2])
+    ppid_of[pid] = ppid
+    cpu_of[pid] = pcpu
+children = {}
+for pid, ppid in ppid_of.items():
+    children.setdefault(ppid, []).append(pid)
+total = 0.0
+stack = [root]
+while stack:
+    p = stack.pop()
+    total += cpu_of.get(p, 0.0)
+    stack.extend(children.get(p, []))
+print(f"{total:.1f}")
+PY
+)
+  fi
+
+  printf '%s|%s|%s|%s|%s|%s' "$cwd" "$host" "$is_cc" "$interesting" "$agent" "$cpu"
+}
+
+# ---------- screen analysis (used for both local & remote) ----------
+# Reads stdin (raw terminal text), prints "<last_meaningful_line>\037<processing_bool>"
+analyze_screen() {
+  python3 <(cat <<'PY'
+import sys, re
+text = sys.stdin.read()[-6000:]
+ansi = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*(?:\x07|\x1b\\)|\x1b[()][AB012]|\x1b[=>NOM]")
+clean = ansi.sub("", text)
+clean = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", clean)
+lines = [l.rstrip() for l in clean.splitlines()]
+
+# Processing detection — explicit "interrupt" prompts and Codex thinking states
+tail = "\n".join(lines[-15:])
+processing = bool(re.search(
+    r"esc to interrupt|press\s+(?:ctrl[-+\s]?c|esc)\s+to\s+(?:stop|interrupt|cancel)|thinking[…\.\s]|generating[…\.\s]",
+    tail, re.I | re.M))
+
+NOISE_PATTERNS = [
+    r"^⏵",                                      # Claude bypass-permissions footer
+    r"^\?\s+for\b.*shortcuts",                  # "? for shortcuts" help line
+    r"shift\+tab to cycle",
+    r"to (select|navigate|cancel|quit|kill|jump|exit|continue|cycle)",
+    r"^[<>?]\s",                                # input markers
+    r"^[\s│┃║|╭╮╰╯─━═┌┐└┘┏┓┗┛<>?·\.•◦○●]+$",  # only borders/punctuation
+    r"^[─━═]{3,}",                              # horizontal rules
+]
+NOISE_RE = re.compile("|".join(NOISE_PATTERNS), re.I)
+
+def trim_box(s):
+    s = re.sub(r"^[│┃║|╭╰─\s]+", "", s)
+    s = re.sub(r"[│┃║|╮╯─\s]+$", "", s)
+    return s
+
+useful = ""
+for line in reversed(lines[-50:]):
+    s = trim_box(line)
+    if len(s.strip()) < 3: continue
+    if NOISE_RE.search(s): continue
+    useful = s[:240]
+    break
+
+sys.stdout.write(f"{useful}\x1f{'true' if processing else 'false'}")
+PY
+)
+}
+
+# File-based cache (works across subshells). Each session's text lives
+# at $TEXT_DIR/<uid>; populated by a single osascript via collect_texts.
+TEXT_DIR=""
+prefetch_texts() {
+  [ -n "$TEXT_DIR" ] && [ -d "$TEXT_DIR" ] && return
+  TEXT_DIR=$(mktemp -d "/tmp/list-iterms-texts.XXXXXX")
+  collect_texts 2>/dev/null | python3 - "$TEXT_DIR" <<'PY'
+import sys, os
+text_dir = sys.argv[1]
+data = sys.stdin.read()
+for record in data.split("\x1e"):
+    if "\x1f" not in record: continue
+    uid, text = record.split("\x1f", 1)
+    uid = uid.strip()
+    if uid:
+        with open(os.path.join(text_dir, uid), "w") as f:
+            f.write(text)
+PY
+}
+get_iterm_text() {
+  [ -z "$TEXT_DIR" ] && return
+  [ -f "$TEXT_DIR/$1" ] && cat "$TEXT_DIR/$1"
+}
+cleanup_text_cache() {
+  [ -n "$TEXT_DIR" ] && [ -d "$TEXT_DIR" ] && rm -rf "$TEXT_DIR"
+}
+trap cleanup_text_cache EXIT
+
+# ---------- remote tmux-CC enrichment ----------
+declare -A REMOTE_PANE_CWD REMOTE_PANE_CMD REMOTE_PANE_AGENT REMOTE_PANE_LAST REMOTE_PANE_PROC
+REMOTE_FETCHED=""
+
+fetch_remote_panes() {
+  local host=$1
+  case " $REMOTE_FETCHED " in *" $host "*) return ;; esac
+  REMOTE_FETCHED="$REMOTE_FETCHED $host"
+  local out
+  # Single SSH round-trip: list panes, descendants for agent detection,
+  # capture-pane output (base64 to survive any raw bytes).
+  out=$(ssh -o ControlMaster=auto \
+            -o ControlPath="/tmp/cm-list-iterms-%r@%h:%p" \
+            -o ControlPersist=300 \
+            -o ConnectTimeout=4 \
+            -o BatchMode=yes \
+            "$host" '
+tmux list-panes -a -F "#{pane_id}|#{pane_title}|#{pane_current_path}|#{pane_current_command}|#{pane_pid}" 2>/dev/null | \
+while IFS="|" read pane_id title path cmd pid; do
+  agent=""
+  desc=$(pgrep -P "$pid" 2>/dev/null; ps -ax -o pid=,ppid= | awk -v r="$pid" "function walk(p){for(c in ch[p]){print c; walk(c)}} {ch[\$2][\$1]=1} END{walk(r)}")
+  for p in $pid $desc; do
+    cm=$(ps -p "$p" -o command= 2>/dev/null)
+    if echo "$cm" | grep -qE "(^| |/)claude( |$)"; then agent=claude; break; fi
+    if echo "$cm" | grep -qE "(^| |/)codex( |$)"; then agent=codex; break; fi
+  done
+  cap=$(tmux capture-pane -p -e -t "$pane_id" 2>/dev/null | tail -40 | base64 | tr -d "\n")
+  printf "%s\037%s\037%s\037%s\037%s\037%s\n" "$title" "$path" "$cmd" "$pid" "$agent" "$cap"
+done
+' 2>/dev/null)
+  while IFS=$'\037' read -r title path cmd pid agent cap_b64; do
+    [ -z "$title" ] && continue
+    REMOTE_PANE_CWD["$title"]=$path
+    REMOTE_PANE_CMD["$title"]=$cmd
+    REMOTE_PANE_AGENT["$title"]=$agent
+    if [ -n "$cap_b64" ]; then
+      local analysis
+      analysis=$(printf '%s' "$cap_b64" | base64 -D 2>/dev/null | analyze_screen)
+      REMOTE_PANE_LAST["$title"]=${analysis%$'\x1f'*}
+      REMOTE_PANE_PROC["$title"]=${analysis##*$'\x1f'}
+    fi
+  done <<< "$out"
+}
+
+# ---------- json subcommand (for Hammerspoon chooser etc.) ----------
+if [ "${1-}" = "json" ]; then
+  jq_escape() { python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${1-}"; }
+
+  raw=$(collect)
+  prefetch_texts  # one big osascript for all session screens
+
+  # Detect tmux-CC controllers globally (iTerm hides the controller session,
+  # so we can't find it via AppleScript — scan ps instead).
+  controllers=$(ps -axo command= 2>/dev/null \
+    | awk '/^ssh / && /tmux/ && /-CC/ {
+        for (i=2; i<=NF; i++) if ($i !~ /^-/ && $i != "tmux") { print $i; break }
+      }')
+  cc_count=$(printf '%s\n' "$controllers" | grep -c .)
+  sole_host=""
+  [ "$cc_count" = "1" ] && sole_host=$(printf '%s\n' "$controllers" | head -1)
+
+  # Pre-fetch remote panes for the sole host (single SSH round-trip).
+  [ -n "$sole_host" ] && fetch_remote_panes "$sole_host"
+
+  echo "["
+  first=1
+  while IFS='|' read -r win wid tab sess uid tty name; do
+    [ -z "$win" ] && continue
+    last_line=""; processing="false"
+    if [ -z "$tty" ] || [ "$tty" = "missing value" ]; then
+      ttyname=""; virtual="true"
+      cwd=""; host="$sole_host"; is_cc="false"
+      interesting=""; agent=""; cpu=0
+      if [ -n "$sole_host" ]; then
+        cwd=${REMOTE_PANE_CWD["$name"]:-}
+        interesting=${REMOTE_PANE_CMD["$name"]:-}
+        agent=${REMOTE_PANE_AGENT["$name"]:-}
+        last_line=${REMOTE_PANE_LAST["$name"]:-}
+        processing=${REMOTE_PANE_PROC["$name"]:-false}
+      fi
+    else
+      ttyname=$(basename "$tty")
+      virtual="false"
+      IFS='|' read -r cwd host is_cc interesting agent cpu < <(inspect_tty "$ttyname")
+      # Only capture/analyze the screen for sessions where it actually adds info
+      # (agents or the "interesting" non-shell processes). Saves ~50% on idle shells.
+      if [ -n "$agent" ] || [ -n "$interesting" ]; then
+        analysis=$(get_iterm_text "$uid" | analyze_screen)
+        last_line=${analysis%$'\x1f'*}
+        processing=${analysis##*$'\x1f'}
+      fi
+    fi
+    [ $first -eq 0 ] && echo ","
+    first=0
+    printf '  {"win":%s,"tab":%s,"sess":%s,"iterm_window_id":%s,"uid":%s,"tty":%s,"title":%s,"cwd":%s,"ssh_host":%s,"tmux_cc_controller":%s,"tmux_cc_virtual":%s,"running":%s,"agent":%s,"cpu":%s,"last_line":%s,"processing":%s}' \
+      "$win" "$tab" "$sess" "$wid" \
+      "$(jq_escape "$uid")" \
+      "$(jq_escape "$ttyname")" \
+      "$(jq_escape "$name")" \
+      "$(jq_escape "$cwd")" \
+      "$(jq_escape "$host")" \
+      "$is_cc" "$virtual" \
+      "$(jq_escape "$interesting")" \
+      "$(jq_escape "$agent")" \
+      "${cpu:-0}" \
+      "$(jq_escape "$last_line")" \
+      "${processing:-false}"
+  done <<< "$raw"
+  echo
+  echo "]"
+  exit 0
+fi
+
+# ---------- inventory (YAML) ----------
+yq() {  # escape for YAML double-quoted scalar
+  local s=${1-}
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  printf '"%s"' "$s"
+}
+
+tmp=$(mktemp)
+osascript >"$tmp" <<'APPLESCRIPT'
+tell application "iTerm2"
+  set out to ""
+  set wIdx to 0
+  repeat with w in windows
+    set wIdx to wIdx + 1
+    set wid to id of w
+    set tIdx to 0
+    repeat with t in tabs of w
+      set tIdx to tIdx + 1
+      set sIdx to 0
+      repeat with s in sessions of t
+        set sIdx to sIdx + 1
+        set sTty to ""
+        try
+          set sTty to (tty of s) as string
+        end try
+        set out to out & wIdx & "|" & wid & "|" & tIdx & "|" & sIdx & "|" & (unique id of s) & "|" & sTty & "|" & (name of s) & linefeed
+      end repeat
+    end repeat
+  end repeat
+  return out
+end tell
+APPLESCRIPT
+
+echo "windows:"
+
+prev_win=""
+prev_tab=""
+
+while IFS='|' read -r win wid tab sess uid tty name; do
+  [ -z "$win" ] && continue
+
+  if [ "$win" != "$prev_win" ]; then
+    printf '  - id: %s\n    iterm_window_id: %s\n    tabs:\n' "$win" "$wid"
+    prev_win=$win
+    prev_tab=""
+  fi
+  if [ "$tab" != "$prev_tab" ]; then
+    printf '      - id: %s\n        sessions:\n' "$tab"
+    prev_tab=$tab
+  fi
+
+  printf '          - id: %s\n' "$sess"
+  printf '            session_uid: %s\n' "$(yq "$uid")"
+  printf '            title: %s\n' "$(yq "$name")"
+  printf '            focus_cmd: %s\n' "$(yq "~/list-iterms focus $uid")"
+
+  if [ -z "$tty" ] || [ "$tty" = "missing value" ]; then
+    printf '            tty: null\n'
+    printf '            tmux_cc_virtual: true\n'
+    printf '            note: %s\n' "$(yq "tmux -CC virtual session — pane runs on remote host; focus_cmd still selects this iTerm session, which selects the remote tmux pane")"
+    continue
+  fi
+
+  ttyname=$(basename "$tty")
+  printf '            tty: %s\n' "$ttyname"
+  printf '            tmux_cc_virtual: false\n'
+
+  fg_pid=$(ps -t "$ttyname" -o pid=,stat= 2>/dev/null | awk '$2 ~ /\+/ {print $1; exit}')
+  [ -z "$fg_pid" ] && fg_pid=$(ps -t "$ttyname" -o pid= 2>/dev/null | awk 'NF{p=$1} END{print p}')
+  cwd=""
+  if [ -n "$fg_pid" ]; then
+    cwd=$(lsof -a -d cwd -p "$fg_pid" -Fn 2>/dev/null | awk '/^n/{print substr($0,2); exit}')
+  fi
+  printf '            cwd: %s\n' "$(yq "$cwd")"
+
+  ssh_proc=$(ps -t "$ttyname" -o command= 2>/dev/null \
+              | grep -E '(^| )ssh ([^-]|-[^V])' | grep -v grep | head -1)
+  if [ -n "$ssh_proc" ]; then
+    host=$(echo "$ssh_proc" | awk '{for(i=2;i<=NF;i++) if($i!~/^-/ && $i!="tmux"){print $i; exit}}')
+    is_cc=false
+    echo "$ssh_proc" | grep -q -- '-CC' && is_cc=true
+    printf '            ssh:\n'
+    printf '              host: %s\n' "$(yq "$host")"
+    printf '              tmux_cc_controller: %s\n' "$is_cc"
+    printf '              command: %s\n' "$(yq "$ssh_proc")"
+  else
+    printf '            ssh: null\n'
+  fi
+
+  printf '            processes:\n'
+  while IFS= read -r line; do
+    pid=$(echo "$line" | awk '{print $1}')
+    stat=$(echo "$line" | awk '{print $2}')
+    cmd=$(echo "$line" | awk '{for(i=3;i<=NF;i++) printf "%s%s", $i, (i<NF?" ":"")}')
+    printf '              - pid: %s\n                stat: %s\n                command: %s\n' \
+      "$pid" "$(yq "$stat")" "$(yq "$cmd")"
+  done < <(ps -t "$ttyname" -o pid=,stat=,command= 2>/dev/null)
+
+done <"$tmp"
+rm -f "$tmp"
+
+echo "tmux_cc_controllers:"
+ps -axo tty=,command= 2>/dev/null \
+  | awk '$2 == "ssh" && /tmux/ && /-CC/ {
+      tty=$1; line=$0; sub(/^[^ ]+ +/, "", line);
+      host="";
+      n=split(line, a, " ");
+      for (i=2; i<=n; i++) if (a[i] !~ /^-/ && a[i] != "tmux") { host=a[i]; break }
+      print tty "|" host "|" line
+    }' \
+  | while IFS='|' read -r ctty chost ccmd; do
+      printf '  - tty: %s\n    host: %s\n    command: %s\n' \
+        "$ctty" "$(yq "$chost")" "$(yq "$ccmd")"
+    done
