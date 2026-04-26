@@ -1,9 +1,9 @@
 # xtermswitch
 
-Fast, fuzzy iTerm2 session switcher for macOS. Hammerspoon hotkey pops up a
-glassy webview listing every iTerm session — local windows, SSH hosts, tmux-CC
-panes — with cwd, running process, agent (claude/codex) detection, last-line
-preview, and live-updating activity. Hit Enter to focus the chosen session.
+**A Spotlight for your terminals.** One hotkey opens a glassy, fuzzy-searchable
+list of every iTerm2 session you have open — local windows, SSH targets,
+tmux-CC panes on remote hosts — with the cwd, the running process, and a live
+preview of what's happening on screen. Hit Enter to jump there.
 
 ```
                              ⌘⌥⌃T
@@ -23,105 +23,116 @@ preview, and live-updating activity. Hit Enter to focus the chosen session.
    └────────────────────────────────────────────────────────┘
 ```
 
-## Features
+## Why
 
-- **Single hotkey** (default `⌘⌥⌃T`) opens the picker over any app.
-- **Grouped tree** — Local windows, SSH hosts, tmux-CC controllers.
-- **Fuzzy search** across title, cwd, host, running command.
-- **Agent detection** — flags `claude` / `codex` sessions, shows live %CPU.
-- **Last-line preview** — the most recent meaningful line on each pane.
-- **Remote tmux-CC enrichment** — one batched SSH round-trip, no polling.
-- **Zero idle cost** — no background work while the picker is closed.
+If you live in 30+ terminal sessions across local windows, `ssh` shells, and
+tmux panes on remote hosts, finding the right one becomes a chore. iTerm's
+own switcher only lists titles. xtermswitch shows you what you actually need
+to recognize a session at a glance:
+
+- **Where it is** — local window, which SSH host, which tmux-CC pane
+- **What's running** — `claude`, `codex`, `vim`, `pytest`, plain shell
+- **What you're doing** — current working directory
+- **Whether it's busy** — live %CPU, "thinking…" detection, last meaningful
+  output line
+
+Type a few letters of a path or a hostname; press Enter; you're there.
+
+## Highlights
+
+- **One hotkey, one keypress to focus** — default `⌘⌥⌃T`, fully configurable
+- **Grouped by location** — Local windows, then each SSH host, then tmux-CC
+  controllers
+- **Smart fuzzy search** across title, cwd, host, running command
+- **Agent detection** — flags `claude` / `codex` sessions, shows live activity
+- **Last-line preview** — strips ANSI/box-drawing noise, surfaces real output
+- **Remote tmux-CC enrichment** — single batched SSH round-trip per host;
+  works even with 30+ remote panes
+- **Zero idle cost** — no polling, no background work while the picker is
+  closed; the cache only refreshes while you're looking at it
+- **Glass UI** that floats over any app, dismisses on focus loss
 
 ## Requirements
 
 - macOS
-- [iTerm2](https://iterm2.com/) (with AppleScript automation enabled)
+- [iTerm2](https://iterm2.com/) (Preferences → General → Magic → "Enable Python API"
+  is **not** required; AppleScript is.)
 - [Hammerspoon](https://www.hammerspoon.org/)
-- `bash`, `python3`, `osascript`, `jq`-style helpers from coreutils
+- `python3`, `osascript`, standard `bash` — preinstalled on macOS
 
 ## Install
 
 ```bash
-git clone <repo-url> ~/EXTRACTUM/xtermswitch
+git clone https://github.com/<you>/xtermswitch ~/EXTRACTUM/xtermswitch
 ~/EXTRACTUM/xtermswitch/install.sh
 ```
 
-The installer appends a `dofile(...)` line to `~/.hammerspoon/init.lua` (or
-creates one). Reload Hammerspoon — done.
+Then **Reload Config** from the Hammerspoon menubar icon. Press `⌘⌥⌃T`.
 
-If you'd rather wire it up by hand, add this to `~/.hammerspoon/init.lua`:
+The installer is idempotent — re-running it just verifies the wiring. It:
 
-```lua
-dofile(os.getenv("HOME") .. "/EXTRACTUM/xtermswitch/xtermswitch.lua")
-```
-
-You can also clone elsewhere — the module finds its own `bin/list-iterms`
-relative to itself. Just point `dofile` at the right path.
+1. ensures `bin/list-iterms` is executable
+2. appends a one-line loader to `~/.hammerspoon/init.lua` (or creates one)
+3. seeds `~/.xtermswitch/config.lua` from the example
 
 ## Configuration
 
-All defaults are sensible. To override, drop a Lua table at
-`~/.xtermswitch/config.lua`:
+Edit `~/.xtermswitch/config.lua`. The most common knob is the hotkey:
 
 ```lua
 return {
   hotkey = { mods = {"cmd", "alt", "ctrl"}, key = "T" },
-
-  -- Override path to the bash script (default: <project>/bin/list-iterms)
-  -- list_iterms = "/usr/local/bin/list-iterms",
-
-  cache_interval_open = 5,    -- seconds between background refreshes
-  width_max           = 900,
-  width_factor        = 0.55, -- fraction of screen width
-  height_factor       = 0.80,
-  show_load_alert     = true,
+  -- list_iterms = "/usr/local/bin/list-iterms",   -- override script path
+  cache_interval_open = 5,
+  width_max     = 900,
+  width_factor  = 0.55,
+  height_factor = 0.80,
+  show_load_alert = true,
 }
 ```
 
-See `config.example.lua` for the full set.
+See [`config.example.lua`](config.example.lua) for the full list.
 
-## Usage
+## Keys
 
-- `⌘⌥⌃T` — open picker (configurable)
-- `↑` `↓` — move selection
-- type — fuzzy filter
-- `Enter` — focus selected session
-- `Esc` — close
+| Key                | Action                |
+|--------------------|-----------------------|
+| `⌘⌥⌃T`             | Open picker           |
+| `↑` `↓`            | Move selection        |
+| `Ctrl-N` `Ctrl-P`  | Move selection (vim)  |
+| Type               | Fuzzy filter          |
+| `↵`                | Focus selected        |
+| `Esc`              | Close                 |
+| Click on group     | Collapse / expand     |
+| Click outside      | Close                 |
 
-The bash script is also useful directly:
+## Standalone CLI
+
+The data collector is useful on its own:
 
 ```bash
-~/EXTRACTUM/xtermswitch/bin/list-iterms          # YAML inventory
+~/EXTRACTUM/xtermswitch/bin/list-iterms          # full YAML inventory
 ~/EXTRACTUM/xtermswitch/bin/list-iterms json     # JSON for chooser UIs
 ~/EXTRACTUM/xtermswitch/bin/list-iterms focus <session-uid>
 ```
 
-## How it works
+## Privacy
 
-`bin/list-iterms` drives iTerm via AppleScript to enumerate every session and
-its TTY, then walks `ps`/`lsof` to recover cwd, ssh target, agent processes,
-and CPU. For tmux-CC virtual sessions it does one batched SSH round-trip per
-controller host (`tmux list-panes` + `capture-pane`) so even 30+ remote panes
-update in well under a second.
+xtermswitch reads iTerm session metadata, screen text from local panes (via
+AppleScript), and tmux pane snapshots from remote hosts you've configured.
+Everything stays on your machines. No telemetry, no network calls beyond the
+SSH connections to hosts you already trust. See
+[CLAUDE.md](CLAUDE.md) for a full data-flow walk-through.
 
-The Hammerspoon module renders the tree into a transparent webview, hands
-`Enter`/click events back into Lua, and shells out to the same bash script
-with `focus <uid>` to bring the matched session forward.
+## Troubleshooting
 
-## Files
-
-```
-xtermswitch/
-├── xtermswitch.lua          Hammerspoon entry — dofile this
-├── bin/
-│   └── list-iterms          Bash + AppleScript + Python data collector
-├── examples/
-│   └── init.lua             Sample ~/.hammerspoon/init.lua
-├── config.example.lua       Sample ~/.xtermswitch/config.lua
-├── install.sh               One-shot installer
-└── README.md
-```
+- **Picker is empty** — make sure iTerm has at least one window open and
+  AppleScript automation is allowed (System Settings → Privacy & Security →
+  Automation → Hammerspoon → iTerm2).
+- **Remote panes show no `cwd` or `last line`** — the host needs `tmux` and
+  `python3`, and SSH needs to connect with `BatchMode=yes` (key auth, no
+  password prompt). Set up `ssh-agent` or `ControlMaster`.
+- **Hotkey conflicts** — change `hotkey` in `~/.xtermswitch/config.lua`.
 
 ## License
 
