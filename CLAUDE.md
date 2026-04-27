@@ -313,6 +313,7 @@ emit JSON (run the bash script directly to see stderr).
 | `attempt to call a nil value (method '...')`   | Old code in the appWatcher callback — see invariant in §1.1    |
 | Hotkey doesn't fire                            | Conflict with another global hotkey; check `hs.hotkey.showHotkeys()` |
 | Webview opens behind the active app            | macOS Stage Manager interaction; reload Hammerspoon            |
+| Two `ssh -CC` tunnels open, virtuals show under "tmux-CC" placeholder | Not supported. `bin/list-iterms` only attributes a host to virtuals when exactly one tmux-CC controller is running (`cc_count == 1`). With multiple, virtual sessions still appear but are bundled under a generic `"tmux-CC"` group. |
 
 ## Files written outside the project
 

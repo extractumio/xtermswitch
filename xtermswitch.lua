@@ -98,11 +98,10 @@ end
 local function buildTreeFromSessions(data)
   if type(data) ~= "table" then return {groups = {}} end
 
-  local soleHost, n = nil, 0
-  for _, s in ipairs(data) do
-    if s.tmux_cc_controller then n = n + 1; soleHost = s.ssh_host end
-  end
-  if n ~= 1 then soleHost = nil end
+  -- Note: iTerm hides the tmux-CC controller session from AppleScript, so no
+  -- JSON entry has tmux_cc_controller=true. The host for a virtual session
+  -- comes from bash (`bin/list-iterms` scans `ps` and writes it into ssh_host).
+  -- Trust the JSON; don't re-derive here.
 
   local locWins, lwMap = {}, {}
   local remHosts, rhMap = {}, {}
@@ -138,17 +137,22 @@ local function buildTreeFromSessions(data)
       lastLine = s.last_line or "",
       running = s.running or "",
       runShort = shortRun(s.running),
-      kind = (s.tmux_cc_virtual or (s.ssh_host and s.ssh_host ~= "")) and "remote" or "local",
+      kind = s.tmux_cc_virtual and "tmux"
+             or (s.ssh_host and s.ssh_host ~= "") and "ssh"
+             or "local",
     }
   end
 
   for _, s in ipairs(data) do
     if s.tmux_cc_virtual then
-      table.insert(getRem(soleHost or "tmux-CC").sessions, entry(s))
+      local host = (s.ssh_host and s.ssh_host ~= "") and s.ssh_host or "tmux-CC"
+      local r = getRem(host)
+      table.insert(r.sessions, entry(s))
+      r.tmuxCC = true
     elseif s.ssh_host and s.ssh_host ~= "" then
       local r = getRem(s.ssh_host)
       table.insert(r.sessions, entry(s))
-      if s.tmux_cc_controller then r.controller = true end
+      if s.tmux_cc_controller then r.tmuxCC = true end
     else
       if not lwMap[s.win] then
         lwMap[s.win] = {id = s.win, sessions = {}}
@@ -174,8 +178,8 @@ local function buildTreeFromSessions(data)
   end
   for _, r in ipairs(remHosts) do
     table.insert(groups, {
-      kind = "remote",
-      label = (r.controller and "tmux-CC · " or "SSH · ") .. (r.host or "?"),
+      kind = r.tmuxCC and "tmux" or "ssh",
+      label = (r.tmuxCC and "tmux-CC · " or "SSH · ") .. (r.host or "?"),
       count = #r.sessions,
       windows = {{label = nil, sessions = r.sessions}},
     })
@@ -190,147 +194,186 @@ local HTML = [==[
 <!doctype html>
 <html><head><meta charset="utf-8">
 <style>
-  :root { color-scheme: dark; }
-  html,body { margin:0; padding:0; height:100%; background:transparent; overflow:hidden;
-              font-family:-apple-system, "SF Pro Text", system-ui, sans-serif;
-              -webkit-font-smoothing:antialiased; }
+  :root {
+    color-scheme: dark;
+    --bg: rgba(22,22,24,0.96);
+    --border: rgba(255,255,255,0.10);
+    --divider: rgba(255,255,255,0.06);
+    --fg: #f5f5f7;
+    --muted: rgba(255,255,255,0.55);
+    --dim: rgba(255,255,255,0.42);
+    --c-local: #5b9eff;
+    --c-ssh: #4dd693;
+    --c-tmux: #ffa845;
+    --c-agent: #c4a8ff;
+    --c-pulse: #5fd57f;
+    --sel-bg: linear-gradient(180deg, rgba(10,132,255,0.95), rgba(10,120,235,0.95));
+    /* Shared horizontal rhythm — keeps icon columns aligned across group/window/row. */
+    --pad-x: 22px;
+    --col-icon: 32px;
+    --col-icon-sm: 26px;
+    --gap: 12px;
+  }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: transparent; overflow: hidden;
+    font-family: -apple-system, "SF Pro Text", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
   #app {
-    height:100%;
-    background: rgba(22,22,24,0.95);
+    height: 100%;
+    background: var(--bg);
     backdrop-filter: blur(40px) saturate(180%);
     -webkit-backdrop-filter: blur(40px) saturate(180%);
-    border-radius:14px;
-    border: 0.5px solid rgba(255,255,255,0.12);
+    border-radius: 14px;
+    border: 0.5px solid var(--border);
     box-shadow: 0 24px 80px rgba(0,0,0,0.65);
-    display:flex; flex-direction:column;
-    color:#f5f5f7;
+    display: flex; flex-direction: column;
+    color: var(--fg);
   }
   #search {
-    padding:18px 22px;
-    border:0; background:transparent; outline:none;
-    color:#fff; font-size:20px; font-weight:600; letter-spacing:-0.01em;
-    border-bottom: 0.5px solid rgba(255,255,255,0.10);
+    padding: 18px var(--pad-x);
+    border: 0; background: transparent; outline: none;
+    color: #fff;
+    font-size: 21px; font-weight: 600; letter-spacing: -0.01em;
+    border-bottom: 0.5px solid var(--divider);
   }
-  #search::placeholder { color: rgba(255,255,255,0.40); font-weight:500; }
-  #list { flex:1; overflow-y:auto; padding:8px 0 12px; }
-  #list::-webkit-scrollbar { width:8px; }
-  #list::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.14); border-radius:4px; }
+  #search::placeholder { color: var(--dim); font-weight: 500; }
+  #list { flex: 1; overflow-y: auto; padding: 6px 0 12px; }
+  #list::-webkit-scrollbar { width: 8px; }
+  #list::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.14); border-radius: 4px; }
   #list::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.22); }
 
+  /* Section header (Local / SSH · host / tmux-CC · host) */
   .group {
-    display:flex; align-items:center; gap:10px;
-    padding:14px 22px 6px;
-    font-size:11px; font-weight:800; letter-spacing:0.12em; text-transform:uppercase;
-    color: rgba(255,255,255,0.70);
-    cursor:pointer; user-select:none;
+    display: flex; align-items: center; gap: 10px;
+    padding: 16px var(--pad-x) 8px;
+    font-size: 12px; font-weight: 800; letter-spacing: 0.12em; text-transform: uppercase;
+    color: rgba(255,255,255,0.72);
+    cursor: pointer; user-select: none;
   }
-  .group .chev { width:10px; transition:transform .15s; opacity:0.7; }
-  .group.collapsed .chev { transform:rotate(-90deg); }
-  .group .icon { font-size:14px; opacity:0.85; }
+  .group .chev { width: 11px; height: 11px; transition: transform .15s; opacity: 0.7; flex-shrink: 0; }
+  .group.collapsed .chev { transform: rotate(-90deg); }
+  .group .icon-wrap {
+    width: var(--col-icon-sm); height: var(--col-icon-sm);
+    display: flex; align-items: center; justify-content: center;
+    border-radius: 7px; flex-shrink: 0;
+  }
+  .group .icon-wrap svg { width: 16px; height: 16px; }
+  .group .label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .group .count {
-    font-size:10px; font-weight:500; padding:2px 7px; border-radius:9px;
-    background: rgba(255,255,255,0.08); color: rgba(255,255,255,0.55);
-    letter-spacing:0;
+    font-size: 11px; font-weight: 600; padding: 2px 9px; border-radius: 10px;
+    letter-spacing: 0; flex-shrink: 0;
   }
-  .group.local .count { background: rgba(64,156,255,0.18); color:#7ab8ff; }
-  .group.remote .count { background: rgba(255,159,90,0.18); color:#ffb37a; }
+  .group.local .icon-wrap { background: rgba(91,158,255,0.16);  color: var(--c-local); }
+  .group.ssh   .icon-wrap { background: rgba(77,214,147,0.16);  color: var(--c-ssh); }
+  .group.tmux  .icon-wrap { background: rgba(255,168,69,0.18);  color: var(--c-tmux); }
+  .group.local .count { background: rgba(91,158,255,0.18); color: #87b9ff; }
+  .group.ssh   .count { background: rgba(77,214,147,0.18); color: #6fdfb0; }
+  .group.tmux  .count { background: rgba(255,168,69,0.20); color: #ffc27a; }
 
+  /* Per-iTerm-window subheader (only for local groups). */
   .window {
-    display:flex; align-items:center; gap:8px;
-    padding:6px 22px 4px 38px;
-    font-size:12px; color: rgba(255,255,255,0.70); font-weight:700;
-    cursor:pointer; user-select:none;
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px var(--pad-x) 4px 30px;
+    font-size: 12.5px; color: rgba(255,255,255,0.62); font-weight: 600;
+    letter-spacing: 0.02em;
+    cursor: pointer; user-select: none;
   }
-  .window .chev { width:9px; transition:transform .15s; opacity:0.55; }
-  .window.collapsed .chev { transform:rotate(-90deg); }
+  .window .chev { width: 10px; height: 10px; transition: transform .15s; opacity: 0.50; flex-shrink: 0; }
+  .window.collapsed .chev { transform: rotate(-90deg); }
+  .window .meta { opacity: 0.55; font-weight: 500; }
 
+  /* Session row — fixed icon column at 50px so every row icon snaps to the
+     same vertical line regardless of nesting under a window subheader. */
   .row {
-    display:flex; align-items:center; gap:12px;
-    padding:9px 14px;
+    display: flex; align-items: center; gap: var(--gap);
+    padding: 10px 14px 10px 50px;
     margin: 1px 8px;
-    border-radius:8px;
-    cursor:pointer;
+    border-radius: 9px;
+    cursor: pointer;
     transition: background-color 0.08s;
   }
-  .row.indent { padding-left:46px; }
-  .row.indent2 { padding-left:62px; }
-  .row .icon {
-    width:28px; height:28px; flex-shrink:0;
-    display:flex; align-items:center; justify-content:center;
-    border-radius:7px;
-    font-size:14px;
-    background: rgba(255,255,255,0.06);
+  .row .icon-wrap {
+    width: var(--col-icon); height: var(--col-icon);
+    display: flex; align-items: center; justify-content: center;
+    border-radius: 8px;
+    flex-shrink: 0;
   }
-  .row.local .icon { background: linear-gradient(135deg, rgba(64,156,255,0.22), rgba(64,156,255,0.10)); color:#7ab8ff; }
-  .row.remote .icon { background: linear-gradient(135deg, rgba(255,159,90,0.22), rgba(255,159,90,0.10)); color:#ffb37a; }
-  .row .text { flex:1; min-width:0; }
+  .row .icon-wrap svg { width: 18px; height: 18px; }
+  .row.local .icon-wrap { background: linear-gradient(135deg, rgba(91,158,255,0.24), rgba(91,158,255,0.10)); color: var(--c-local); }
+  .row.ssh   .icon-wrap { background: linear-gradient(135deg, rgba(77,214,147,0.24), rgba(77,214,147,0.10)); color: var(--c-ssh); }
+  .row.tmux  .icon-wrap { background: linear-gradient(135deg, rgba(255,168,69,0.26), rgba(255,168,69,0.12)); color: var(--c-tmux); }
+  .row .text { flex: 1; min-width: 0; }
   .row .title {
-    font-size:14px; font-weight:700; color:#fff;
-    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
-    line-height:1.25;
+    font-size: 15px; font-weight: 700; color: #fff;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    line-height: 1.25;
   }
+  /* Path/cwd line — same size as title; weight a notch lower for hierarchy. */
   .row .sub {
-    font-size:11.5px; color: rgba(255,255,255,0.55); font-weight:500;
+    font-size: 15px; color: var(--muted); font-weight: 500;
     font-family: "SF Mono", ui-monospace, Menlo, monospace;
-    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
-    line-height:1.4; margin-top:2px;
-    display:flex; gap:10px; align-items:center;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    line-height: 1.3; margin-top: 3px;
+    display: flex; gap: 10px; align-items: center;
   }
-  .row .cwd { color:#e6cd9a; font-weight:700; }
-  .row .host { color: rgba(135,180,255,0.85); font-weight:600; }
-  .row .sep { opacity:0.35; }
-  .row.sel .cwd  { color:#ffe9b8; }
-  .row.sel .host { color:#cfe1ff; }
+  .row .cwd  { color: #e6cd9a; font-weight: 600; }
+  .row .host { color: rgba(135,180,255,0.85); font-weight: 600; font-size: 12.5px; }
+  .row .sep  { opacity: 0.32; }
   .row .last {
-    font-size:11px; color: rgba(255,255,255,0.50); font-weight:500;
+    font-size: 12px; color: rgba(255,255,255,0.55); font-weight: 500;
     font-style: italic;
     font-family: -apple-system, "SF Pro Text", system-ui, sans-serif;
-    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
-    line-height:1.4; margin-top:3px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    line-height: 1.4; margin-top: 3px;
   }
-  .row.sel .last { color: rgba(255,255,255,0.85); }
 
   .pulse {
-    width:8px; height:8px; border-radius:50%;
-    background:#5fd57f;
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--c-pulse);
     box-shadow: 0 0 0 0 rgba(95,213,127,0.7);
     animation: pulse 1.4s infinite;
-    flex-shrink:0;
+    flex-shrink: 0;
   }
-  .pulse.idle { background: rgba(255,255,255,0.20); animation:none; box-shadow:none; }
+  .pulse.idle { background: rgba(255,255,255,0.22); animation: none; box-shadow: none; }
   @keyframes pulse {
     0%   { box-shadow: 0 0 0 0 rgba(95,213,127,0.55); }
     70%  { box-shadow: 0 0 0 8px rgba(95,213,127,0); }
     100% { box-shadow: 0 0 0 0 rgba(95,213,127,0); }
   }
+
   .row .badge {
-    font-size:10.5px; font-weight:700;
-    padding:3px 8px; border-radius:5px;
+    font-size: 11.5px; font-weight: 700;
+    padding: 3px 8px; border-radius: 5px;
     background: rgba(255,255,255,0.12); color: rgba(255,255,255,0.85);
-    flex-shrink:0;
-    font-family:"SF Mono", ui-monospace, monospace;
+    flex-shrink: 0;
+    font-family: "SF Mono", ui-monospace, monospace;
   }
-  .row.has-claude .badge { background: rgba(140,90,255,0.22); color:#c4a8ff; }
+  .row.has-claude .badge { background: rgba(157,122,255,0.22); color: var(--c-agent); }
 
-  .row.sel { background: linear-gradient(180deg, rgba(10,132,255,0.92), rgba(10,120,235,0.92)); }
-  .row.sel .title { color:#fff; }
+  .row.sel { background: var(--sel-bg); }
+  .row.sel .title { color: #fff; }
   .row.sel .sub   { color: rgba(255,255,255,0.85); }
-  .row.sel .badge { background: rgba(255,255,255,0.22); color:#fff; }
-  .row.sel .icon  { background: rgba(255,255,255,0.20); color:#fff; }
+  .row.sel .last  { color: rgba(255,255,255,0.85); }
+  .row.sel .badge { background: rgba(255,255,255,0.22); color: #fff; }
+  .row.sel .icon-wrap { background: rgba(255,255,255,0.22); color: #fff; }
+  .row.sel .cwd   { color: #ffe9b8; }
+  .row.sel .host  { color: #cfe1ff; }
 
-  .hidden { display:none !important; }
+  .hidden { display: none !important; }
 
   #footer {
-    padding:8px 18px;
-    border-top: 0.5px solid rgba(255,255,255,0.06);
-    font-size:10.5px; color: rgba(255,255,255,0.40);
-    display:flex; gap:18px; justify-content:flex-end;
-    font-family:"SF Mono", ui-monospace, monospace;
+    padding: 9px 18px;
+    border-top: 0.5px solid var(--divider);
+    font-size: 11.5px; color: var(--dim);
+    display: flex; gap: 18px; justify-content: flex-end;
+    font-family: "SF Mono", ui-monospace, monospace;
   }
   #footer kbd {
-    padding:1px 6px; border-radius:4px;
-    background: rgba(255,255,255,0.10); color: rgba(255,255,255,0.75);
-    font-family:inherit; font-size:10px;
+    padding: 1px 6px; border-radius: 4px;
+    background: rgba(255,255,255,0.10); color: rgba(255,255,255,0.78);
+    font-family: inherit; font-size: 11px;
   }
 </style></head>
 <body>
@@ -355,8 +398,16 @@ let rows = [];
 let leafIdx = [];
 let cursor = 0;
 
-function makeIcon(kind) {
-  return kind === 'local' ? '🖥' : '🌐';
+// Heroicons-outline 24×24 (MIT, https://github.com/tailwindlabs/heroicons),
+// mirrored on svgrepo. Inner markup only — wrapped with currentColor.
+const ICON_PATHS = {
+  local: '<path stroke-linecap="round" stroke-linejoin="round" d="M9 17.25v1.007a3 3 0 0 1-.879 2.122L7.5 21h9l-.621-.621A3 3 0 0 1 15 18.257V17.25m6-12V15a2.25 2.25 0 0 1-2.25 2.25H5.25A2.25 2.25 0 0 1 3 15V5.25m18 0A2.25 2.25 0 0 0 18.75 3H5.25A2.25 2.25 0 0 0 3 5.25m18 0V12a2.25 2.25 0 0 1-2.25 2.25H5.25A2.25 2.25 0 0 1 3 12V5.25"/>',
+  ssh:   '<path stroke-linecap="round" stroke-linejoin="round" d="M5.25 14.25h13.5m-13.5 0a3 3 0 0 1-3-3m3 3a3 3 0 1 0 0 6h13.5a3 3 0 1 0 0-6m-16.5-3a3 3 0 0 1 3-3h13.5a3 3 0 0 1 3 3m-19.5 0a4.5 4.5 0 0 1 .9-2.7L5.737 5.1a3.375 3.375 0 0 1 2.7-1.35h7.126c1.062 0 2.062.5 2.7 1.35l2.587 3.45a4.5 4.5 0 0 1 .9 2.7m0 0a3 3 0 0 1-3 3m0 3h.008v.008h-.008v-.008Zm0-6h.008v.008h-.008v-.008Zm-3 6h.008v.008h-.008v-.008Zm0-6h.008v.008h-.008v-.008Z"/>',
+  tmux:  '<path stroke-linecap="round" stroke-linejoin="round" d="M6 6.878V6a2.25 2.25 0 0 1 2.25-2.25h7.5A2.25 2.25 0 0 1 18 6v.878m-12 0c.235-.083.487-.128.75-.128h10.5c.263 0 .515.045.75.128m-12 0A2.25 2.25 0 0 0 4.5 9v.878m13.5-3A2.25 2.25 0 0 1 19.5 9v.878m0 0a2.246 2.246 0 0 0-.75-.128H5.25c-.263 0-.515.045-.75.128m15 0A2.25 2.25 0 0 1 21 12v6a2.25 2.25 0 0 1-2.25 2.25H5.25A2.25 2.25 0 0 1 3 18v-6c0-.98.626-1.813 1.5-2.122"/>',
+};
+function svgIcon(kind) {
+  const inner = ICON_PATHS[kind] || ICON_PATHS.local;
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">${inner}</svg>`;
 }
 
 function render() {
@@ -366,9 +417,9 @@ function render() {
     const ge = document.createElement('div');
     ge.className = `group ${g.kind}`;
     ge.innerHTML = `
-      <svg class="chev" viewBox="0 0 10 10" width="10" height="10"><path fill="currentColor" d="M2 3l3 4 3-4z"/></svg>
-      <span class="icon">${makeIcon(g.kind)}</span>
-      <span>${esc(g.label)}</span>
+      <svg class="chev" viewBox="0 0 10 10" width="11" height="11"><path fill="currentColor" d="M2 3l3 4 3-4z"/></svg>
+      <span class="icon-wrap">${svgIcon(g.kind)}</span>
+      <span class="label">${esc(g.label)}</span>
       <span class="count">${g.count}</span>`;
     list.appendChild(ge);
     const grec = {el: ge, group: g, children: []};
@@ -381,9 +432,9 @@ function render() {
         const we = document.createElement('div');
         we.className = 'window';
         we.innerHTML = `
-          <svg class="chev" viewBox="0 0 10 10" width="9" height="9"><path fill="currentColor" d="M2 3l3 4 3-4z"/></svg>
+          <svg class="chev" viewBox="0 0 10 10" width="10" height="10"><path fill="currentColor" d="M2 3l3 4 3-4z"/></svg>
           <span>${esc(w.label)}</span>
-          <span style="opacity:.55">·  ${w.sessions.length} session${w.sessions.length===1?'':'s'}</span>`;
+          <span class="meta">·  ${w.sessions.length} session${w.sessions.length===1?'':'s'}</span>`;
         list.appendChild(we);
         wrec = {el: we, win: w, parent: grec, children: []};
         rows.push(wrec);
@@ -394,11 +445,10 @@ function render() {
         const r = document.createElement('div');
         const isAgent = !!s.agent;
         const active = !!s.processing;
-        r.className = `row ${s.kind} ${w.label ? 'indent2' : 'indent'} ${isAgent?'has-claude':''}`;
-        const subParts = [];
-        if (s.cwd)  subParts.push(`<span class="cwd">${esc(s.cwd)}</span>`);
-        if (s.host) subParts.push(`<span class="host">${esc(s.host)}</span>`);
-        const sub = subParts.join('<span class="sep">·</span>');
+        r.className = `row ${s.kind} ${isAgent?'has-claude':''}`;
+        // Host context lives in the group header (e.g. "tmux-CC · 10.195.48.28"),
+        // so the row only needs to show its cwd.
+        const sub = s.cwd ? `<span class="cwd">${esc(s.cwd)}</span>` : '';
         const cpuStr = (s.cpu >= 5) ? ` ${s.cpu.toFixed(0)}%` : '';
         const badge = s.agent
           ? `<span class="badge">${esc(s.agent)}${cpuStr}</span>`
@@ -406,7 +456,7 @@ function render() {
         const dot = isAgent ? `<div class="pulse ${active?'':'idle'}"></div>` : '';
         const lastLine = s.lastLine ? `<div class="last">${esc(s.lastLine)}</div>` : '';
         r.innerHTML = `
-          <div class="icon">${makeIcon(s.kind)}</div>
+          <div class="icon-wrap">${svgIcon(s.kind)}</div>
           <div class="text">
             <div class="title">${esc(s.title)}</div>
             <div class="sub">${sub}</div>
@@ -445,7 +495,7 @@ function applyFilter() {
   if (q) {
     rows.forEach(r => {
       if (r.leaf) {
-        const hay = (r.leaf.title + ' ' + r.leaf.sub + ' ' + (r.leaf.running||'')).toLowerCase();
+        const hay = (r.leaf.title + ' ' + (r.leaf.cwd||'') + ' ' + (r.leaf.host||'') + ' ' + (r.leaf.running||'')).toLowerCase();
         if (!hay.includes(q)) r.el.classList.add('hidden');
       }
     });

@@ -9,6 +9,17 @@
 # uid still works — iTerm mirrors tmux panes 1:1 as sessions, so focusing the
 # iTerm session focuses the matching remote tmux pane.
 
+# Re-exec under bash 4+ if we landed in macOS's stock /bin/bash 3.2.
+# Hammerspoon's hs.task uses a minimal PATH that resolves `env bash` to 3.2,
+# which lacks `declare -A` and silently produces wrong output.
+if [ "${BASH_VERSINFO[0]:-0}" -lt 4 ]; then
+  for _b in /opt/homebrew/bin/bash /usr/local/bin/bash; do
+    [ -x "$_b" ] && exec "$_b" "$0" "$@"
+  done
+  echo "list-iterms: requires bash 4+ (install via: brew install bash)" >&2
+  exit 1
+fi
+
 set -u
 
 # ---------- focus subcommand ----------
