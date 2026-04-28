@@ -105,17 +105,39 @@ echo "Linked iTerm2 daemon into AutoLaunch scripts."
 iterm_running=$(osascript -e 'application "iTerm2" is running' 2>/dev/null || echo false)
 
 if [ "$iterm_running" = "true" ]; then
-  # iTerm2 Python API. iTerm2 doesn't reliably expose the toggle state via
-  # `defaults`, but it spawns a long-running iTermServer process when the
-  # API server is up. Detect via process list — no permission required.
-  if ! ps -axo command= 2>/dev/null | grep -q '/iTermServer-'; then
+  # iTerm2's Python API requires a bundled Python runtime that the user
+  # accepts on first enable. The runtime lives at:
+  #   ~/Library/Application Support/iTerm2/iterm2env-*
+  # If that directory is missing, the API has never been enabled and any
+  # AutoLaunch script — including our daemon — is silently ignored.
+  iterm_support="$HOME/Library/Application Support/iTerm2"
+  has_runtime=0
+  for d in "$iterm_support"/iterm2env-*; do
+    [ -d "$d" ] && { has_runtime=1; break; }
+  done
+  daemon_running=0
+  if pgrep -f xtermswitch_daemon.py >/dev/null 2>&1; then
+    daemon_running=1
+  fi
+
+  if [ "$has_runtime" -eq 0 ]; then
     echo
-    echo "WARNING: iTerm2 Python API server is not running. The xtermswitch"
-    echo "  daemon will exit silently and remote tmux-CC enrichment will fall"
-    echo "  back to bash-only mode."
-    echo "  Enable: Settings → General → Magic → Enable Python API"
-    echo "  Then restart iTerm2 (or run Scripts → Manage → Install Python Runtime"
-    echo "  if iTerm2 prompts for it on first use)."
+    echo "WARNING: iTerm2 Python API has never been enabled on this machine."
+    echo "  iTerm2 has not downloaded its bundled Python runtime, so the"
+    echo "  xtermswitch_daemon AutoLaunch script cannot run. The picker will"
+    echo "  fall back to bash-only mode (slower, no per-event refresh)."
+    echo
+    echo "  To enable:"
+    echo "    1. iTerm2 → Settings → General → Magic → Enable Python API"
+    echo "    2. Accept the prompt to download the Python runtime (~10 MB)"
+    echo "    3. Restart iTerm2"
+    echo "    4. Verify: ls ~/Library/Application\\ Support/iTerm2/iterm2env-*"
+  elif [ "$daemon_running" -eq 0 ]; then
+    echo
+    echo "WARNING: Python runtime is installed but xtermswitch_daemon is not"
+    echo "  running. AutoLaunch fires only at iTerm2 startup, so a fresh"
+    echo "  install needs an iTerm2 restart, or one-time launch via:"
+    echo "    iTerm2 → Scripts → AutoLaunch → xtermswitch_daemon.py"
   fi
 
   # Probe macOS Automation permission. The first AppleScript call targeting
