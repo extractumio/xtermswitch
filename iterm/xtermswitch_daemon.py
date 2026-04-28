@@ -262,6 +262,10 @@ class State:
         last_line = old.get("last_line", "")
         processing = bool(old.get("processing", False))
         question = bool(old.get("question", False))
+        # iTerm mirrors tmux-CC virtual pane content locally, so
+        # async_get_screen_contents works on virtuals too. Don't gate this on
+        # is_virtual; agents (claude/codex) running remotely produce useful
+        # last_line and processing flags from the local screen buffer.
         if include_screen:
             text = await screen_text(session)
             if text:
@@ -279,8 +283,11 @@ class State:
             "uid": sid,
             "tty": basename(tty),
             "title": title,
-            "cwd": cwd or old.get("cwd", ""),
-            "ssh_host": host or old.get("ssh_host", ""),
+            # For tmux-CC virtual panes, iTerm reports local-machine values
+            # for path/hostname (or empty). Don't let those overwrite the
+            # remote-truth values that the bash collector fetches via SSH.
+            "cwd": ("" if is_virtual else cwd) or old.get("cwd", ""),
+            "ssh_host": ("" if is_virtual else host) or old.get("ssh_host", ""),
             "tmux_pane": tmux_pane or old.get("tmux_pane", ""),
             "tmux_window": tmux_window or old.get("tmux_window", ""),
             "tmux_pane_id": old.get("tmux_pane_id", ""),

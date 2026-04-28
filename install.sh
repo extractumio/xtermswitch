@@ -100,6 +100,43 @@ fi
 ln -sfn "$DIR/iterm/xtermswitch_daemon.py" "$ITERM_AUTOLAUNCH/xtermswitch_daemon.py"
 echo "Linked iTerm2 daemon into AutoLaunch scripts."
 
+# `application "X" is running` is a non-targeted query that does not
+# require Automation permission, so it's safe before the user has granted it.
+iterm_running=$(osascript -e 'application "iTerm2" is running' 2>/dev/null || echo false)
+
+if [ "$iterm_running" = "true" ]; then
+  # iTerm2 Python API. iTerm2 doesn't reliably expose the toggle state via
+  # `defaults`, but it spawns a long-running iTermServer process when the
+  # API server is up. Detect via process list — no permission required.
+  if ! ps -axo command= 2>/dev/null | grep -q '/iTermServer-'; then
+    echo
+    echo "WARNING: iTerm2 Python API server is not running. The xtermswitch"
+    echo "  daemon will exit silently and remote tmux-CC enrichment will fall"
+    echo "  back to bash-only mode."
+    echo "  Enable: Settings → General → Magic → Enable Python API"
+    echo "  Then restart iTerm2 (or run Scripts → Manage → Install Python Runtime"
+    echo "  if iTerm2 prompts for it on first use)."
+  fi
+
+  # Probe macOS Automation permission. The first AppleScript call targeting
+  # iTerm2 from the controlling process surfaces the permission prompt;
+  # doing it here makes the prompt appear during install, not on the first
+  # hotkey press from Hammerspoon (which would silently fail).
+  if ! osascript -e 'tell application "iTerm2" to count windows' >/dev/null 2>&1; then
+    echo
+    echo "WARNING: AppleScript probe of iTerm2 failed. xtermswitch needs"
+    echo "  Automation permission for the controlling process."
+    echo "  System Settings → Privacy & Security → Automation → allow"
+    echo "  Hammerspoon (and Terminal/iTerm2 if you ran install.sh from one)"
+    echo "  to control iTerm2. Then re-run install.sh to verify."
+  fi
+else
+  echo
+  echo "Note: iTerm2 is not running. Start it once before testing the picker so"
+  echo "  macOS can prompt for Automation permission for Hammerspoon, and so the"
+  echo "  AutoLaunch daemon (xtermswitch_daemon.py) starts."
+fi
+
 cat <<EOF
 
 Done. xtermswitch is installed for this checkout.

@@ -18,6 +18,8 @@ xtermswitch/
 ├── install.sh               Idempotent installer
 ├── README.md                Product-facing docs
 ├── CLAUDE.md                This file
+├── docs/
+│   └── TODO.md              Known gaps not yet implemented
 └── LICENSE                  AGPL-3.0-or-later
 ```
 

@@ -815,16 +815,7 @@ end
 
 local activeTask = nil
 local pendingRefresh = nil
-local function refreshCache(mode, onDone)
-  if type(mode) == "function" then
-    onDone = mode
-    mode = "full"
-  end
-  mode = mode or "full"
-  if loadDaemonCache(false) then
-    if onDone then onDone() end
-    return
-  end
+local function runBashCollector(mode, onDone)
   if activeTask then
     if mode == "full" or not pendingRefresh then pendingRefresh = mode end
     return
@@ -847,10 +838,23 @@ local function refreshCache(mode, onDone)
     if pendingRefresh then
       local nextMode = pendingRefresh
       pendingRefresh = nil
-      refreshCache(nextMode)
+      runBashCollector(nextMode)
     end
   end, {"json", mode})
   activeTask:start()
+end
+
+local function refreshCache(mode, onDone)
+  if type(mode) == "function" then
+    onDone = mode
+    mode = "full"
+  end
+  mode = mode or "full"
+  if loadDaemonCache(false) then
+    if onDone then onDone() end
+    return
+  end
+  runBashCollector(mode, onDone)
 end
 
 local function startCacheTimer(interval)
@@ -962,13 +966,16 @@ local function show()
     if webview and webview:hswindow() then webview:hswindow():focus() end
   end)
 
-  -- Daemon path: the file watcher covers updates. Fallback path: prime
-  -- the picker with a fast pass, then a full pass for enrichment.
+  -- Daemon path: the file watcher covers identity updates. Fallback path:
+  -- prime the picker with a fast pass.
+  -- The full bash pass is fired unconditionally on every show() because
+  -- the daemon does not SSH to remote hosts, so tmux-CC virtual panes
+  -- only get cwd/ssh_host/agent enrichment from the bash collector.
   local usingDaemon = startCacheTimer(config.cache_interval_open)
   if not usingDaemon then
     hs.timer.doAfter(0.05, function() refreshCache("fast") end)
-    hs.timer.doAfter(0.4,  function() refreshCache("full") end)
   end
+  hs.timer.doAfter(0.4, function() runBashCollector("full") end)
 
   -- Auto-hide when any other app activates.
   hasFocused = false
