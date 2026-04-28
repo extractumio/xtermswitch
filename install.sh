@@ -22,11 +22,40 @@ for cmd in osascript python3 awk grep sed lsof ps mktemp base64 pgrep; do
     missing=1
   fi
 done
+
+app_installed() {
+  local name=$1 bundle_id=$2
+  for dir in /Applications "$HOME/Applications" /System/Applications; do
+    [ -d "$dir/$name.app" ] && return 0
+  done
+  if command -v mdfind >/dev/null 2>&1; then
+    [ -n "$(mdfind "kMDItemCFBundleIdentifier == '$bundle_id'" 2>/dev/null | head -1)" ] && return 0
+  fi
+  return 1
+}
+
+require_app() {
+  local name=$1 bundle_id=$2 cask=$3 url=$4
+  if app_installed "$name" "$bundle_id"; then
+    return 0
+  fi
+  echo "Missing app: $name is not installed." >&2
+  echo "  Install:   brew install --cask $cask" >&2
+  echo "  Download:  $url" >&2
+  missing=1
+}
+
+require_app Hammerspoon org.hammerspoon.Hammerspoon hammerspoon https://www.hammerspoon.org/
+require_app iTerm2      com.googlecode.iterm2     iterm2      https://iterm2.com/
+
 if ! command -v hs >/dev/null 2>&1; then
-  echo "Note: Hammerspoon CLI 'hs' is not on PATH. This is OK, but reload Hammerspoon manually."
+  echo "Note: Hammerspoon CLI 'hs' is not on PATH (optional). After install,"
+  echo "  enable it from Hammerspoon → Preferences → Advanced → Install command-line tool."
 fi
+
 if [ "$missing" -ne 0 ]; then
-  echo "Install missing dependencies and re-run install.sh." >&2
+  echo >&2
+  echo "Install the items above and re-run install.sh." >&2
   exit 1
 fi
 

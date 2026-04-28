@@ -247,6 +247,7 @@ trap cleanup_text_cache EXIT INT TERM HUP
 # ---------- remote tmux-CC enrichment ----------
 declare -A REMOTE_PANE_CWD REMOTE_PANE_CMD REMOTE_PANE_AGENT REMOTE_PANE_LAST REMOTE_PANE_PROC REMOTE_PANE_ID
 declare -A REMOTE_TITLE_COUNT REMOTE_TITLE_HOST
+declare -A REMOTE_BY_PANE_CWD REMOTE_BY_PANE_CMD REMOTE_BY_PANE_AGENT REMOTE_BY_PANE_LAST REMOTE_BY_PANE_PROC
 REMOTE_FETCHED=""
 
 fetch_remote_panes() {
@@ -276,19 +277,29 @@ while IFS="|" read pane_id title path cmd pid; do
 done
 ' 2>/dev/null)
   while IFS=$'\037' read -r pane_id title path cmd pid agent cap_b64; do
-    [ -z "$title" ] && continue
+    [ -z "$pane_id" ] && continue
     local key="$host"$'\036'"$title"
+    local pkey="$host"$'\036'"$pane_id"
     REMOTE_PANE_ID["$key"]=$pane_id
     REMOTE_PANE_CWD["$key"]=$path
     REMOTE_PANE_CMD["$key"]=$cmd
     REMOTE_PANE_AGENT["$key"]=$agent
-    REMOTE_TITLE_COUNT["$title"]=$((${REMOTE_TITLE_COUNT["$title"]:-0} + 1))
-    REMOTE_TITLE_HOST["$title"]=$host
+    REMOTE_BY_PANE_CWD["$pkey"]=$path
+    REMOTE_BY_PANE_CMD["$pkey"]=$cmd
+    REMOTE_BY_PANE_AGENT["$pkey"]=$agent
+    if [ -n "$title" ]; then
+      REMOTE_TITLE_COUNT["$title"]=$((${REMOTE_TITLE_COUNT["$title"]:-0} + 1))
+      REMOTE_TITLE_HOST["$title"]=$host
+    fi
     if [ -n "$cap_b64" ]; then
-      local analysis
+      local analysis last proc
       analysis=$(printf '%s' "$cap_b64" | base64 -D 2>/dev/null | analyze_screen)
-      REMOTE_PANE_LAST["$key"]=${analysis%$'\x1f'*}
-      REMOTE_PANE_PROC["$key"]=${analysis##*$'\x1f'}
+      last=${analysis%$'\x1f'*}
+      proc=${analysis##*$'\x1f'}
+      REMOTE_PANE_LAST["$key"]=$last
+      REMOTE_PANE_PROC["$key"]=$proc
+      REMOTE_BY_PANE_LAST["$pkey"]=$last
+      REMOTE_BY_PANE_PROC["$pkey"]=$proc
     fi
   done <<< "$out"
 }
@@ -301,6 +312,30 @@ if [ "${1-}" = "json" ]; then
   raw=$(collect)
   if [ "$mode" != "fast" ]; then
     prefetch_texts  # one big osascript for all session screens
+  fi
+
+  # iTerm AppleScript can't read the per-session "tmux.pane" variable; the
+  # iTerm2 Python API can. The xtermswitch daemon writes that pane id into
+  # ~/.cache/xtermswitch/sessions.json. Read it once here so the matching
+  # loop below can prefer pane-id matching over fragile title matching.
+  declare -A UID_TO_TMUX_PANE
+  daemon_cache="${XTERMSWITCH_CACHE:-$HOME/.cache/xtermswitch/sessions.json}"
+  if [ "$mode" != "fast" ] && [ -r "$daemon_cache" ]; then
+    while IFS=$'\t' read -r u p; do
+      [ -n "$u" ] && [ -n "$p" ] && UID_TO_TMUX_PANE["$u"]=$p
+    done < <(python3 - "$daemon_cache" <<'PY' 2>/dev/null
+import json, sys
+try:
+    data = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+for s in (data.get("sessions") if isinstance(data, dict) else data) or []:
+    uid = s.get("uid", "")
+    pane = s.get("tmux_pane", "")
+    if uid and pane:
+        print(f"{uid}\t{pane}")
+PY
+    )
   fi
 
   # Detect tmux-CC controllers globally (iTerm hides the controller session,
@@ -329,23 +364,48 @@ if [ "${1-}" = "json" ]; then
       cwd=""; host="$sole_host"; is_cc="false"
       interesting=""; agent=""; cpu=0; tmux_pane_id=""; enriched="false"
       if [ "$mode" != "fast" ]; then
-        # iTerm exposes tmux-CC virtual panes without a tty. Its AppleScript
-        # name usually matches tmux pane_title. Use it only when unique across
-        # fetched controller hosts; ambiguous titles remain visible but stale
-        # enrichment is intentionally left blank rather than misattributed.
-        if [ "${REMOTE_TITLE_COUNT["$name"]:-0}" = "1" ]; then
-          host=${REMOTE_TITLE_HOST["$name"]:-$host}
+        # Two-step match for tmux-CC virtual panes:
+        # 1. Prefer the daemon-supplied tmux pane id (Python API can read
+        #    "tmux.pane"; AppleScript cannot). The daemon writes it into
+        #    sessionStore, and Lua passes it back via the per-uid hint map
+        #    populated from the daemon cache. We read that map here.
+        # 2. Fall back to a strict-unique iTerm-name vs. tmux pane_title join.
+        # Ambiguous fallbacks remain visible with blank enrichment rather than
+        # being misattributed.
+        matched=""
+        hint_pane=${UID_TO_TMUX_PANE[$uid]:-}
+        if [ -n "$hint_pane" ]; then
+          for h in $REMOTE_FETCHED; do
+            pkey="$h"$'\036'"$hint_pane"
+            if [ -n "${REMOTE_BY_PANE_CWD[$pkey]+x}" ] || [ -n "${REMOTE_BY_PANE_CMD[$pkey]+x}" ] || [ -n "${REMOTE_BY_PANE_AGENT[$pkey]+x}" ]; then
+              host=$h
+              tmux_pane_id=$hint_pane
+              cwd=${REMOTE_BY_PANE_CWD[$pkey]:-}
+              interesting=${REMOTE_BY_PANE_CMD[$pkey]:-}
+              agent=${REMOTE_BY_PANE_AGENT[$pkey]:-}
+              last_line=${REMOTE_BY_PANE_LAST[$pkey]:-}
+              processing=${REMOTE_BY_PANE_PROC[$pkey]:-false}
+              enriched="true"
+              matched=1
+              break
+            fi
+          done
         fi
-        if [ -n "$host" ]; then
-          key="$host"$'\036'"$name"
-          tmux_pane_id=${REMOTE_PANE_ID["$key"]:-}
-          if [ -n "$tmux_pane_id" ]; then
-            enriched="true"
-            cwd=${REMOTE_PANE_CWD["$key"]:-}
-            interesting=${REMOTE_PANE_CMD["$key"]:-}
-            agent=${REMOTE_PANE_AGENT["$key"]:-}
-            last_line=${REMOTE_PANE_LAST["$key"]:-}
-            processing=${REMOTE_PANE_PROC["$key"]:-false}
+        if [ -z "$matched" ]; then
+          if [ "${REMOTE_TITLE_COUNT["$name"]:-0}" = "1" ]; then
+            host=${REMOTE_TITLE_HOST["$name"]:-$host}
+          fi
+          if [ -n "$host" ]; then
+            key="$host"$'\036'"$name"
+            tmux_pane_id=${REMOTE_PANE_ID["$key"]:-}
+            if [ -n "$tmux_pane_id" ]; then
+              enriched="true"
+              cwd=${REMOTE_PANE_CWD["$key"]:-}
+              interesting=${REMOTE_PANE_CMD["$key"]:-}
+              agent=${REMOTE_PANE_AGENT["$key"]:-}
+              last_line=${REMOTE_PANE_LAST["$key"]:-}
+              processing=${REMOTE_PANE_PROC["$key"]:-false}
+            fi
           fi
         fi
       fi

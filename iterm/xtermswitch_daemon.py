@@ -246,6 +246,18 @@ class State:
         cwd = await session_var(session, "session.path", "path", "session.currentDirectory")
         host = await session_var(session, "session.hostname", "hostname")
         tty = await session_var(session, "session.tty", "tty")
+        # tmux pane id (e.g. %42) lets the bash collector match this session
+        # to the right remote tmux pane even when an agent has overwritten the
+        # iTerm-displayed title via OSC 0/2. AppleScript can't read iTerm2
+        # session variables; the Python API can. Variable names differ across
+        # iTerm2 versions, so try several candidates.
+        tmux_pane = await session_var(
+            session, "tmux.pane", "tmuxPane", "user.tmux.pane", "tmux_pane"
+        )
+        tmux_window = await session_var(
+            session, "tmux.window", "tmuxWindow", "user.tmux.window", "tmux_window"
+        )
+        is_virtual = bool(tmux_pane) and not tty
         text = ""
         last_line = old.get("last_line", "")
         processing = bool(old.get("processing", False))
@@ -269,9 +281,11 @@ class State:
             "title": title,
             "cwd": cwd or old.get("cwd", ""),
             "ssh_host": host or old.get("ssh_host", ""),
+            "tmux_pane": tmux_pane or old.get("tmux_pane", ""),
+            "tmux_window": tmux_window or old.get("tmux_window", ""),
             "tmux_pane_id": old.get("tmux_pane_id", ""),
             "tmux_cc_controller": False,
-            "tmux_cc_virtual": False,
+            "tmux_cc_virtual": is_virtual or bool(old.get("tmux_cc_virtual", False)),
             "running": status_override.get("running", old.get("running", "")),
             "agent": agent,
             "status": status,

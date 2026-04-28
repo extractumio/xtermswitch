@@ -57,11 +57,16 @@ Type a few letters of a path or a hostname; press Enter; you're there.
 ## Requirements
 
 - macOS
-- [iTerm2](https://iterm2.com/) with Preferences → General → Magic →
-  **Enable Python API** for event-based updates. AppleScript is still used as
-  a fallback collector and for focusing selected sessions.
-- [Hammerspoon](https://www.hammerspoon.org/)
+- [Hammerspoon](https://www.hammerspoon.org/) — `brew install --cask hammerspoon`
+- [iTerm2](https://iterm2.com/) — `brew install --cask iterm2` —
+  with Preferences → General → Magic → **Enable Python API** for event-based
+  updates. AppleScript is still used as a fallback collector and for focusing
+  selected sessions.
 - `python3`, `osascript`, standard `bash` — preinstalled on macOS
+
+`install.sh` checks for both apps and refuses to proceed if either is missing,
+so a fresh machine gets clear next-step instructions instead of a silently
+broken install.
 
 ## Install
 

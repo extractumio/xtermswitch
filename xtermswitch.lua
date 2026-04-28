@@ -681,7 +681,19 @@ local function mergeSessionSnapshot(data, mode)
                            k == "running" or k == "agent" or k == "cpu" or
                            k == "last_line" or k == "processing"
         local reliableEnrichment = incoming.enriched == true
-        if enrichment and not reliableEnrichment then
+        if k == "tmux_cc_virtual" then
+          -- Sticky: bash collector reliably sets this true for tmux-CC
+          -- virtual panes; the daemon may emit false before it has read
+          -- the tmux.pane variable. Don't let a false clobber a true.
+          if v == true or rec.tmux_cc_virtual ~= true then
+            merged[k] = v
+          end
+        elseif k == "tmux_pane" then
+          -- Sticky: pane ids don't change for the lifetime of a pane.
+          if hasValue(v) or not hasValue(rec.tmux_pane) then
+            merged[k] = v
+          end
+        elseif enrichment and not reliableEnrichment then
           if (k == "ssh_host" or k == "tmux_pane_id") and hasValue(v) then
             merged[k] = v
           end
