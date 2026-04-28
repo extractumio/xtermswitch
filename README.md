@@ -5,20 +5,27 @@ list of every iTerm2 session you have open — local windows, SSH targets,
 tmux-CC panes on remote hosts — with the cwd, the running process, and a live
 preview of what's happening on screen. Hit Enter to jump there.
 
+<p align="center">
+  <img src="docs/screenshot.png" alt="xtermswitch picker"
+       width="525">
+</p>
+
 ```
                              ⌘⌥⌃T
    ┌────────────────────────────────────────────────────────┐
    │  Search sessions, hosts, paths…                        │
    ├────────────────────────────────────────────────────────┤
-   │  LOCAL                                              7  │
-   │   iTerm 17                                             │
-   │     🖥  ~/src/xtermswitch             claude  ●        │
-   │     🖥  ~/concrete_jungle             zsh              │
-   │   iTerm 18                                             │
-   │     🖥  ~                             ssh              │
-   │  SSH · prod-1                                       3  │
-   │     🌐 logs                           tmux-CC          │
-   │     ...                                                │
+   │  LOCAL                                              5  │
+   │   iTerm 1                                              │
+   │     🖥  ~/src/xtermswitch         claude  ●            │
+   │     🖥  ~/work/billing-api        pytest               │
+   │   iTerm 2                                              │
+   │     🖥  ~/notes                   nvim                 │
+   │  SSH · prod-1                                       2  │
+   │     🌐 ~/services/api-gateway     tail -f              │
+   │  TMUX-CC · staging-2                                3  │
+   │     🪟 ~/repos/payments-svc      claude  ●            │
+   │     🪟 ~/repos/payments-svc      go test               │
    │  ↑↓ navigate   ↵ focus   esc close                     │
    └────────────────────────────────────────────────────────┘
 ```
@@ -53,6 +60,75 @@ Type a few letters of a path or a hostname; press Enter; you're there.
 - **Low idle cost** — the iTerm2 daemon updates on iTerm events; fallback
   AppleScript/SSH polling runs only while the picker is open
 - **Glass UI** that floats over any app, dismisses on focus loss
+
+## How it works
+
+xtermswitch is three small processes that share one JSON file. Each piece is
+independently useful and can be run on its own; together they keep the picker
+responsive without polling iTerm in the background.
+
+```
+         ┌──────────────────────────────┐
+         │  Hammerspoon module          │   xtermswitch.lua
+         │  • global hotkey  ⌘⌥⌃T       │
+         │  • glass-UI webview          │
+         │  • merges + renders sessions │
+         └──────────────┬───────────────┘
+                        │ reads / file-watches
+                        ▼
+         ┌──────────────────────────────┐
+         │  ~/.cache/xtermswitch/       │
+         │     sessions.json            │   shared cache
+         └────▲─────────────────────▲───┘
+              │ event-driven        │ on-demand SSH +
+              │ (writes on each     │ screen capture
+              │  iTerm event)       │ (writes on every
+              │                     │  picker open)
+   ┌──────────┴───────────┐   ┌─────┴───────────────────┐
+   │  iTerm2 Python       │   │  list-iterms (bash)     │
+   │  daemon              │   │  • osascript walks      │
+   │  • runs in iTerm2    │   │    iTerm windows/tabs   │
+   │    via AutoLaunch    │   │  • SSH to each tmux-CC  │
+   │  • subscribes to     │   │    host once, batched   │
+   │    new/terminate/    │   │    via ControlMaster    │
+   │    focus/screen/     │   │  • feeds picker on      │
+   │    prompt events     │   │    every show() in case │
+   │  • zero polling      │   │    daemon is unavailable│
+   └──────────────────────┘   └─────────────────────────┘
+```
+
+**The picker** (`xtermswitch.lua`) is a Hammerspoon module. It owns the
+hotkey, the borderless webview UI, and the in-memory session cache. While
+the picker is closed it does literally nothing. When you hit `⌘⌥⌃T` it
+loads the current `sessions.json`, paints the UI, starts a file-watcher on
+the cache, and fires one bash refresh in the background.
+
+**The iTerm2 daemon** (`iterm/xtermswitch_daemon.py`) is a long-running
+script that iTerm2 launches at startup via its AutoLaunch hook. It uses
+iTerm2's Python API to subscribe to session lifecycle, focus, screen, and
+prompt notifications, then atomically writes an updated `sessions.json`
+each time something changes. No polling — the daemon sleeps until iTerm
+wakes it. Within ~80 ms of you typing in any iTerm pane, the picker (if
+open) sees the new last-line.
+
+**The collector** (`bin/list-iterms`) is a self-contained bash script that
+walks iTerm via AppleScript, inspects `ps`/`lsof` for each local TTY, and
+opens one batched SSH round-trip per remote host to query `tmux
+list-panes` + `tmux capture-pane`. It produces the same JSON shape as the
+daemon and serves two roles: (a) the fallback when the iTerm2 Python API
+is disabled, (b) the source of remote tmux-CC enrichment (cwd, agent,
+last-line) the daemon can't reach over the iTerm2 API alone. The picker
+fires it once on every open so remote panes refresh promptly. SSH calls
+reuse `ControlMaster` so the second call to a host is near-instant.
+
+**The cache** is the contract between all three. It's a JSON array of
+session records keyed by iTerm's stable `unique id`, plus an `updated_at`
+timestamp. The picker's merge logic preserves whichever source has the
+freshest reliable data per field, so the daemon and collector can run
+concurrently without stepping on each other.
+
+For deep-dive details (data shape, AppleScript dictionary, regex
+heuristics for screen analysis), see [CLAUDE.md](CLAUDE.md).
 
 ## Requirements
 
