@@ -12,8 +12,22 @@ DIR=$(cd "$(dirname "$0")" && pwd)
 HS_DIR="$HOME/.hammerspoon"
 HS_INIT="$HS_DIR/init.lua"
 LOAD_LINE="dofile(\"$DIR/xtermswitch.lua\")"
-ITERM_AUTOLAUNCH="$HOME/Library/Application Support/iTerm2/Scripts/AutoLaunch"
 CACHE_DIR="$HOME/.cache/xtermswitch"
+
+# iTerm2 ≥3.5 may store its support directory under either
+#   ~/Library/Application Support/iTerm2          (default)
+#   ~/.config/iterm2/AppSupport                   (XDG layout)
+# Prefer whichever exists as a real directory (not a symlink to the other);
+# fall back to the default. This is the path AutoLaunch scripts must live
+# under for iTerm2 to discover them.
+iterm_support_dir() {
+  for p in "$HOME/.config/iterm2/AppSupport" "$HOME/Library/Application Support/iTerm2"; do
+    [ -d "$p" ] && [ ! -L "$p" ] && { echo "$p"; return; }
+  done
+  echo "$HOME/Library/Application Support/iTerm2"
+}
+ITERM_SUPPORT=$(iterm_support_dir)
+ITERM_AUTOLAUNCH="$ITERM_SUPPORT/Scripts/AutoLaunch"
 
 missing=0
 for cmd in osascript python3 awk grep sed lsof ps mktemp base64 pgrep; do
@@ -106,13 +120,10 @@ iterm_running=$(osascript -e 'application "iTerm2" is running' 2>/dev/null || ec
 
 if [ "$iterm_running" = "true" ]; then
   # iTerm2's Python API requires a bundled Python runtime that the user
-  # accepts on first enable. The runtime lives at:
-  #   ~/Library/Application Support/iTerm2/iterm2env-*
-  # If that directory is missing, the API has never been enabled and any
-  # AutoLaunch script — including our daemon — is silently ignored.
-  iterm_support="$HOME/Library/Application Support/iTerm2"
+  # accepts on first enable. Look for it under whichever support directory
+  # iTerm2 is actually using on this machine.
   has_runtime=0
-  for d in "$iterm_support"/iterm2env-*; do
+  for d in "$ITERM_SUPPORT"/iterm2env-*; do
     [ -d "$d" ] && { has_runtime=1; break; }
   done
   daemon_running=0
