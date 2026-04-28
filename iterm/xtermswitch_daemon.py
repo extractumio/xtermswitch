@@ -17,12 +17,21 @@ import asyncio
 import json
 import os
 import re
+import socket
 import tempfile
 import time
 from pathlib import Path
 from typing import Any
 
 import iterm2
+
+# iTerm2 reports the machine's own hostname as session.hostname even when no
+# remote ssh is involved. Treat that as "local" — equivalent to empty.
+LOCAL_HOSTNAMES = {
+    socket.gethostname().lower(),
+    socket.gethostname().split(".")[0].lower(),
+    "localhost",
+}
 
 CACHE_PATH = Path(os.environ.get(
     "XTERMSWITCH_CACHE",
@@ -246,18 +255,24 @@ class State:
         cwd = await session_var(session, "session.path", "path", "session.currentDirectory")
         host = await session_var(session, "session.hostname", "hostname")
         tty = await session_var(session, "session.tty", "tty")
-        # tmux pane id (e.g. %42) lets the bash collector match this session
-        # to the right remote tmux pane even when an agent has overwritten the
-        # iTerm-displayed title via OSC 0/2. AppleScript can't read iTerm2
-        # session variables; the Python API can. Variable names differ across
-        # iTerm2 versions, so try several candidates.
+        # iTerm2 v2.11 exposes no tmux pane id on virtual sessions. The
+        # reliable signals it does expose are:
+        #   tmuxRole == "client"      → tmux-CC virtual pane
+        #   session.tmuxPaneTitle     → mirrors remote tmux pane_title; more
+        #                                stable than session.name, which agents
+        #                                may rewrite via OSC 0/2 escapes
+        #   session.path (virtual)    → REMOTE path (good — keep)
+        #   session.hostname (virtual) → LOCAL hostname (bad — must skip below)
+        tmux_role = await session_var(session, "tmuxRole", "session.tmuxRole")
+        tmux_pane_title = await session_var(session, "session.tmuxPaneTitle", "tmuxPaneTitle")
+        tmux_window = await session_var(session, "tab.tmuxWindow", "tmux.window")
+        is_virtual = tmux_role == "client"
+        # Kept for forward-compat: a real pane id would let the bash
+        # collector join by id instead of title. Probed names below all
+        # return empty in v2.11.
         tmux_pane = await session_var(
             session, "tmux.pane", "tmuxPane", "user.tmux.pane", "tmux_pane"
         )
-        tmux_window = await session_var(
-            session, "tmux.window", "tmuxWindow", "user.tmux.window", "tmux_window"
-        )
-        is_virtual = bool(tmux_pane) and not tty
         text = ""
         last_line = old.get("last_line", "")
         processing = bool(old.get("processing", False))
@@ -283,12 +298,21 @@ class State:
             "uid": sid,
             "tty": basename(tty),
             "title": title,
-            # For tmux-CC virtual panes, iTerm reports local-machine values
-            # for path/hostname (or empty). Don't let those overwrite the
-            # remote-truth values that the bash collector fetches via SSH.
-            "cwd": ("" if is_virtual else cwd) or old.get("cwd", ""),
-            "ssh_host": ("" if is_virtual else host) or old.get("ssh_host", ""),
+            # For tmux-CC virtual panes:
+            #   session.path is the REMOTE path — keep it.
+            #   session.hostname is the LOCAL hostname — skip; let the bash
+            #     collector fill ssh_host from `ps` of the SSH controller.
+            # For local sessions:
+            #   iTerm reports the machine's own hostname as session.hostname
+            #   by default, which would put the row in the wrong group. Treat
+            #   it as empty so the bash collector (process-based) wins.
+            "cwd": cwd or old.get("cwd", ""),
+            "ssh_host": (
+                "" if is_virtual or (host or "").lower() in LOCAL_HOSTNAMES
+                else host
+            ) or old.get("ssh_host", ""),
             "tmux_pane": tmux_pane or old.get("tmux_pane", ""),
+            "tmux_pane_title": tmux_pane_title or old.get("tmux_pane_title", ""),
             "tmux_window": tmux_window or old.get("tmux_window", ""),
             "tmux_pane_id": old.get("tmux_pane_id", ""),
             "tmux_cc_controller": False,
@@ -384,7 +408,10 @@ class State:
 
 async def main(connection: iterm2.Connection) -> None:
     state = State(connection)
-    all_sessions = iterm2.Session.all_proxy(connection)
+    # iterm2.Session.all_proxy(connection) is broken in iterm2-python 2.11
+    # (AttributeError: 'str' object has no attribute 'session'). The
+    # subscription functions accept session=None to mean "all sessions",
+    # which is what we want anyway.
 
     async def snapshot_callback(_connection, _notification):
         await state.snapshot_all()
@@ -425,14 +452,15 @@ async def main(connection: iterm2.Connection) -> None:
     await iterm2.notifications.async_subscribe_to_terminate_session_notification(connection, terminate_callback)
     await iterm2.notifications.async_subscribe_to_layout_change_notification(connection, snapshot_callback)
     await iterm2.notifications.async_subscribe_to_focus_change_notification(connection, snapshot_callback)
-    await iterm2.notifications.async_subscribe_to_location_change_notification(connection, session_callback, session=all_sessions)
-    await iterm2.notifications.async_subscribe_to_screen_update_notification(connection, screen_callback, session=all_sessions)
-    await iterm2.notifications.async_subscribe_to_custom_escape_sequence_notification(connection, custom_callback, session=all_sessions)
+    # location_change_notification was removed in iterm2-python 2.11.
+    # cwd / hostname updates are picked up via prompt_notification (fires on
+    # each shell prompt with shell integration) and the focus/layout snapshots.
+    await iterm2.notifications.async_subscribe_to_screen_update_notification(connection, screen_callback)
+    await iterm2.notifications.async_subscribe_to_custom_escape_sequence_notification(connection, custom_callback)
     try:
         await iterm2.notifications.async_subscribe_to_prompt_notification(
             connection,
             session_callback,
-            session=all_sessions,
             modes=[iterm2.PromptState.EDITING, iterm2.PromptState.RUNNING, iterm2.PromptState.FINISHED],
         )
     except Exception:
