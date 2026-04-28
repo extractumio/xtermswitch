@@ -84,6 +84,9 @@ return {
   hotkey = { mods = {"cmd", "alt", "ctrl"}, key = "T" },
   -- list_iterms = "/usr/local/bin/list-iterms",   -- override script path
   cache_interval_open = 5,
+  cache_interval_fast = 1.5,
+  stale_ttl_seconds   = 15,
+  stale_miss_limit    = 2,
   width_max     = 900,
   width_factor  = 0.55,
   height_factor = 0.80,

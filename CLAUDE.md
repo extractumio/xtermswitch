@@ -58,9 +58,9 @@ Top-level structure:
 Key invariants:
 
 - **Idle cost is zero.** No timers run unless the picker is open. The
-  `cacheTimer` is started in `show()` and stopped in `close()`. A single
-  warm-cache refresh fires at module load so the first hotkey press is
-  instant.
+  `cacheTimer` and `fastCacheTimer` are started in `show()` and stopped in
+  `close()`. A single warm-cache refresh fires at module load so the first
+  hotkey press is instant.
 - **Picker is single-instance.** `show()` calls `close()` first; the user
   content controller, webview, and watcher are all torn down on close.
 - **Auto-hide uses `hs.application.watcher`, not webview focus.** Borderless
@@ -102,7 +102,7 @@ A bash script with three subcommands.
 
 ```
 list-iterms                  # YAML inventory (human / debugging)
-list-iterms json             # flat JSON array, one entry per session (UI)
+list-iterms json [fast|full] # flat JSON array, one entry per session (UI)
 list-iterms focus <uid>      # bring that session to front
 ```
 
@@ -211,8 +211,8 @@ opaque `uid` for round-tripping back to `list-iterms focus`.
 3. If `cache == nil` (no warm cache yet), do a synchronous `shell()` call
    to populate it before rendering.
 4. Inject `__TREE_JSON__` placeholder; show webview; focus its window.
-5. Start `cacheTimer` (every `cache_interval_open` seconds) and fire one
-   immediate async refresh after 100ms.
+5. Start the fast and full cache timers, then fire immediate async fast/full
+   refreshes.
 6. Start `hs.application.watcher` for auto-hide.
 
 ### Picker close
@@ -245,6 +245,9 @@ Recognized keys:
 | `hotkey.key`          | string  | `"T"`                                      | single key                                  |
 | `list_iterms`         | string  | `<DIR>/bin/list-iterms`                    | absolute path to data collector             |
 | `cache_interval_open` | number  | `5`                                        | seconds, while picker open                  |
+| `cache_interval_fast` | number  | `1.5`                                      | cheap identity refresh cadence while open   |
+| `stale_ttl_seconds`   | number  | `15`                                       | seconds to retain temporarily missed rows   |
+| `stale_miss_limit`    | number  | `2`                                        | misses before stale rows can be removed     |
 | `width_max`           | number  | `900`                                      | px cap                                      |
 | `width_factor`        | number  | `0.55`                                     | fraction of main screen width               |
 | `height_factor`       | number  | `0.80`                                     | fraction of main screen height              |

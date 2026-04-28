@@ -43,6 +43,9 @@ local config = {
   hotkey              = { mods = {"cmd", "alt", "ctrl"}, key = "T" },
   list_iterms         = DIR .. "bin/list-iterms",
   cache_interval_open = 5,
+  cache_interval_fast = 1.5,
+  stale_ttl_seconds   = 15,
+  stale_miss_limit    = 2,
   width_max           = 900,
   width_factor        = 0.55,
   height_factor       = 0.80,
@@ -137,6 +140,7 @@ local function buildTreeFromSessions(data)
       lastLine = s.last_line or "",
       running = s.running or "",
       runShort = shortRun(s.running),
+      stale = s._stale == true,
       kind = s.tmux_cc_virtual and "tmux"
              or (s.ssh_host and s.ssh_host ~= "") and "ssh"
              or "local",
@@ -360,6 +364,7 @@ local HTML = [==[
   .row.sel .icon-wrap { background: rgba(255,255,255,0.22); color: #fff; }
   .row.sel .cwd   { color: #ffe9b8; }
   .row.sel .host  { color: #cfe1ff; }
+  .row.stale { opacity: 0.58; }
 
   .hidden { display: none !important; }
 
@@ -397,6 +402,9 @@ const search = document.getElementById('search');
 let rows = [];
 let leafIdx = [];
 let cursor = 0;
+let selectedUid = null;
+let preserveScroll = false;
+const collapsed = new Set();
 
 // Heroicons-outline 24×24 (MIT, https://github.com/tailwindlabs/heroicons),
 // mirrored on svgrepo. Inner markup only — wrapped with currentColor.
@@ -411,18 +419,21 @@ function svgIcon(kind) {
 }
 
 function render() {
+  const oldScrollTop = list.scrollTop;
   list.innerHTML = '';
   rows = [];
   TREE.groups.forEach(g => {
     const ge = document.createElement('div');
+    const gkey = `g:${g.kind}:${g.label}`;
     ge.className = `group ${g.kind}`;
+    if (collapsed.has(gkey)) ge.classList.add('collapsed');
     ge.innerHTML = `
       <svg class="chev" viewBox="0 0 10 10" width="11" height="11"><path fill="currentColor" d="M2 3l3 4 3-4z"/></svg>
       <span class="icon-wrap">${svgIcon(g.kind)}</span>
       <span class="label">${esc(g.label)}</span>
       <span class="count">${g.count}</span>`;
     list.appendChild(ge);
-    const grec = {el: ge, group: g, children: []};
+    const grec = {el: ge, group: g, key: gkey, children: []};
     rows.push(grec);
     ge.addEventListener('click', () => toggle(grec));
 
@@ -430,13 +441,15 @@ function render() {
       let wrec = grec;
       if (w.label) {
         const we = document.createElement('div');
+        const wkey = `${gkey}/w:${w.label}`;
         we.className = 'window';
+        if (collapsed.has(wkey)) we.classList.add('collapsed');
         we.innerHTML = `
           <svg class="chev" viewBox="0 0 10 10" width="10" height="10"><path fill="currentColor" d="M2 3l3 4 3-4z"/></svg>
           <span>${esc(w.label)}</span>
           <span class="meta">·  ${w.sessions.length} session${w.sessions.length===1?'':'s'}</span>`;
         list.appendChild(we);
-        wrec = {el: we, win: w, parent: grec, children: []};
+        wrec = {el: we, win: w, key: wkey, parent: grec, children: []};
         rows.push(wrec);
         grec.children.push(wrec);
         we.addEventListener('click', () => toggle(wrec));
@@ -445,7 +458,8 @@ function render() {
         const r = document.createElement('div');
         const isAgent = !!s.agent;
         const active = !!s.processing;
-        r.className = `row ${s.kind} ${isAgent?'has-claude':''}`;
+        r.className = `row ${s.kind} ${isAgent?'has-claude':''} ${s.stale?'stale':''}`;
+        r.dataset.uid = s.uid;
         // Host context lives in the group header (e.g. "tmux-CC · 10.195.48.28"),
         // so the row only needs to show its cwd.
         const sub = s.cwd ? `<span class="cwd">${esc(s.cwd)}</span>` : '';
@@ -465,8 +479,9 @@ function render() {
           ${dot}${badge}`;
         r.addEventListener('click', () => send(s.uid));
         r.addEventListener('mouseenter', () => {
-          const li = leafIdx.indexOf(rows.length);
-          if (li >= 0) { cursor = li; updateSel(); }
+          const idx = rows.findIndex(x => x.leaf && x.leaf.uid === s.uid);
+          const li = leafIdx.indexOf(idx);
+          if (li >= 0) { cursor = li; selectedUid = s.uid; updateSel(false); }
         });
         list.appendChild(r);
         const lrec = {el: r, leaf: s, parent: wrec};
@@ -476,12 +491,19 @@ function render() {
     });
   });
   applyFilter();
+  if (preserveScroll) {
+    list.scrollTop = Math.min(oldScrollTop, Math.max(0, list.scrollHeight - list.clientHeight));
+  }
 }
 
 function toggle(rec) {
   rec.el.classList.toggle('collapsed');
-  const collapsed = rec.el.classList.contains('collapsed');
-  rec.children.forEach(c => setVis(c, !collapsed));
+  if (rec.key) {
+    if (rec.el.classList.contains('collapsed')) collapsed.add(rec.key);
+    else collapsed.delete(rec.key);
+  }
+  const isCollapsed = rec.el.classList.contains('collapsed');
+  rec.children.forEach(c => setVis(c, !isCollapsed));
   refreshLeafIdx();
 }
 function setVis(rec, vis) {
@@ -506,21 +528,35 @@ function applyFilter() {
       }
     });
   }
+  rows.forEach(r => {
+    if ((r.group || r.win) && r.el.classList.contains('collapsed')) {
+      r.children.forEach(c => setVis(c, false));
+    }
+  });
   refreshLeafIdx();
 }
 
 function refreshLeafIdx() {
   leafIdx = [];
   rows.forEach((r,i) => { if (r.leaf && !r.el.classList.contains('hidden')) leafIdx.push(i); });
+  if (selectedUid) {
+    const selectedRowIdx = rows.findIndex(r => r.leaf && r.leaf.uid === selectedUid && !r.el.classList.contains('hidden'));
+    const selectedLeafIdx = leafIdx.indexOf(selectedRowIdx);
+    if (selectedLeafIdx >= 0) cursor = selectedLeafIdx;
+  }
   if (cursor >= leafIdx.length) cursor = Math.max(0, leafIdx.length-1);
-  updateSel();
+  if (leafIdx.length && (!selectedUid || !rows[leafIdx[cursor]] || rows[leafIdx[cursor]].leaf.uid !== selectedUid)) {
+    selectedUid = rows[leafIdx[cursor]].leaf.uid;
+  }
+  updateSel(!preserveScroll);
 }
-function updateSel() {
+function updateSel(shouldScroll = true) {
   rows.forEach(r => r.el.classList.remove('sel'));
   if (!leafIdx.length) return;
   const r = rows[leafIdx[cursor]];
   r.el.classList.add('sel');
-  r.el.scrollIntoView({block:'nearest'});
+  selectedUid = r.leaf.uid;
+  if (shouldScroll) r.el.scrollIntoView({block:'nearest'});
 }
 
 document.addEventListener('keydown', e => {
@@ -531,25 +567,33 @@ document.addEventListener('keydown', e => {
   }
   if (e.key === 'ArrowDown' || (e.ctrlKey && e.key.toLowerCase() === 'n')) {
     e.preventDefault();
-    if (leafIdx.length) { cursor = (cursor+1) % leafIdx.length; updateSel(); }
+    if (leafIdx.length) { cursor = (cursor+1) % leafIdx.length; updateSel(true); }
   } else if (e.key === 'ArrowUp' || (e.ctrlKey && e.key.toLowerCase() === 'p')) {
     e.preventDefault();
-    if (leafIdx.length) { cursor = (cursor-1+leafIdx.length) % leafIdx.length; updateSel(); }
+    if (leafIdx.length) { cursor = (cursor-1+leafIdx.length) % leafIdx.length; updateSel(true); }
   }
 });
-search.addEventListener('input', () => { cursor = 0; applyFilter(); });
+search.addEventListener('input', () => {
+  cursor = 0;
+  selectedUid = null;
+  preserveScroll = false;
+  applyFilter();
+});
 
 window.applyData = function(jsonStr) {
   try {
     const fresh = JSON.parse(jsonStr);
     const q = search.value;
-    const oldCursor = cursor;
+    const oldSelectedUid = selectedUid;
+    const oldScrollTop = list.scrollTop;
     TREE.groups = fresh.groups;
+    selectedUid = oldSelectedUid;
+    preserveScroll = true;
     render();
     search.value = q;
-    cursor = Math.min(oldCursor, leafIdx.length - 1);
-    if (cursor < 0) cursor = 0;
     applyFilter();
+    list.scrollTop = Math.min(oldScrollTop, Math.max(0, list.scrollHeight - list.clientHeight));
+    preserveScroll = false;
   } catch (e) { console.error(e); }
 };
 
@@ -558,13 +602,125 @@ search.focus();
 </script></body></html>
 ]==]
 
+local SHIELD_HTML = [==[
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>
+  html, body { margin: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.18); }
+</style></head>
+<body>
+<script>
+document.addEventListener('mousedown', () => {
+  window.webkit.messageHandlers["iterm-switcher"].postMessage("close");
+});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') window.webkit.messageHandlers["iterm-switcher"].postMessage("close");
+});
+</script>
+</body></html>
+]==]
+
 local webview, ucc, appWatcher, hasFocused
+local shieldViews = {}
 
 -- ============================================================
 -- Cache: zero work while idle. Refresh only on demand.
 -- ============================================================
 local cache = nil
 local cacheTimer = nil
+local fastCacheTimer = nil
+local sessionStore = {}
+local sessionOrder = {}
+
+local function cloneTable(t)
+  local out = {}
+  for k, v in pairs(t or {}) do out[k] = v end
+  return out
+end
+
+local function hasValue(v)
+  return v ~= nil and v ~= ""
+end
+
+local function mergeSessionSnapshot(data, mode)
+  if type(data) ~= "table" then return false end
+  if #data == 0 and #sessionOrder > 0 then return false end
+
+  local now = os.time()
+  local seen = {}
+  local freshOrder = {}
+
+  for _, incoming in ipairs(data) do
+    local uid = incoming.uid
+    if uid and uid ~= "" then
+      seen[uid] = true
+      table.insert(freshOrder, uid)
+
+      local rec = sessionStore[uid] or {}
+      rec.firstSeenAt = rec.firstSeenAt or now
+      rec.lastSeenAt = now
+      rec.misses = 0
+      rec._stale = false
+
+      -- Fast snapshots are intentionally sparse. They update identity and
+      -- placement without wiping richer process/screen data from full passes.
+      local merged = cloneTable(rec)
+      for k, v in pairs(incoming) do
+        local enrichment = k == "cwd" or k == "ssh_host" or k == "tmux_pane_id" or
+                           k == "running" or k == "agent" or k == "cpu" or
+                           k == "last_line" or k == "processing"
+        local reliableEnrichment = incoming.enriched == true
+        if enrichment and not reliableEnrichment then
+          if (k == "ssh_host" or k == "tmux_pane_id") and hasValue(v) then
+            merged[k] = v
+          end
+          -- Keep previous enrichment for sparse fast snapshots and failed
+          -- tmux matches. A reliable full pass may still clear stopped status.
+        else
+          merged[k] = v
+        end
+      end
+      merged.firstSeenAt = rec.firstSeenAt
+      merged.lastSeenAt = now
+      merged.misses = 0
+      merged._stale = false
+      sessionStore[uid] = merged
+    end
+  end
+
+  local newOrder, inOrder = {}, {}
+  for _, uid in ipairs(freshOrder) do
+    if not inOrder[uid] then
+      table.insert(newOrder, uid)
+      inOrder[uid] = true
+    end
+  end
+
+  for _, uid in ipairs(sessionOrder) do
+    if not seen[uid] and sessionStore[uid] then
+      local rec = sessionStore[uid]
+      rec.misses = (rec.misses or 0) + 1
+      rec._stale = true
+      local tooOld = (now - (rec.lastSeenAt or now)) > (config.stale_ttl_seconds or 15)
+      local tooManyMisses = rec.misses > (config.stale_miss_limit or 2)
+      if tooOld and tooManyMisses then
+        sessionStore[uid] = nil
+      else
+        table.insert(newOrder, uid)
+      end
+    end
+  end
+
+  sessionOrder = newOrder
+
+  local sessions = {}
+  for _, uid in ipairs(sessionOrder) do
+    if sessionStore[uid] then table.insert(sessions, sessionStore[uid]) end
+  end
+  cache = buildTreeFromSessions(sessions)
+  _G.itermCache = cache
+  return true
+end
 
 local function rebuildAndPushToWebview()
   if not cache or not webview then return end
@@ -574,8 +730,17 @@ local function rebuildAndPushToWebview()
 end
 
 local activeTask = nil
-local function refreshCache(onDone)
-  if activeTask then return end
+local pendingRefresh = nil
+local function refreshCache(mode, onDone)
+  if type(mode) == "function" then
+    onDone = mode
+    mode = "full"
+  end
+  mode = mode or "full"
+  if activeTask then
+    if mode == "full" or not pendingRefresh then pendingRefresh = mode end
+    return
+  end
   activeTask = hs.task.new(SCRIPT, function(exitCode, stdout, stderr)
     activeTask = nil
     if exitCode ~= 0 or not stdout or stdout == "" then
@@ -588,20 +753,27 @@ local function refreshCache(onDone)
       print("xtermswitch refreshCache: json decode failed")
       return
     end
-    cache = buildTreeFromSessions(data)
-    _G.itermCache = cache
-    if webview then rebuildAndPushToWebview() end
+    local changed = mergeSessionSnapshot(data, mode)
+    if changed and webview then rebuildAndPushToWebview() end
     if onDone then onDone() end
-  end, {"json"})
+    if pendingRefresh then
+      local nextMode = pendingRefresh
+      pendingRefresh = nil
+      refreshCache(nextMode)
+    end
+  end, {"json", mode})
   activeTask:start()
 end
 
 local function startCacheTimer(interval)
   if cacheTimer then cacheTimer:stop() end
-  cacheTimer = hs.timer.doEvery(interval, function() refreshCache() end)
+  cacheTimer = hs.timer.doEvery(interval, function() refreshCache("full") end)
+  if fastCacheTimer then fastCacheTimer:stop() end
+  fastCacheTimer = hs.timer.doEvery(config.cache_interval_fast or 1.5, function() refreshCache("fast") end)
 end
 local function stopCacheTimer()
   if cacheTimer then cacheTimer:stop(); cacheTimer = nil end
+  if fastCacheTimer then fastCacheTimer:stop(); fastCacheTimer = nil end
 end
 
 local function close()
@@ -609,6 +781,11 @@ local function close()
   if webview then
     webview:hide(); webview:delete(); webview = nil
   end
+  for _, shield in ipairs(shieldViews) do
+    shield:hide()
+    shield:delete()
+  end
+  shieldViews = {}
   ucc = nil
   hasFocused = false
   stopCacheTimer()
@@ -638,6 +815,21 @@ local function show()
     else focusUid(body) end
   end)
 
+  for _, screenObj in ipairs(hs.screen.allScreens()) do
+    local shield = hs.webview.new(screenObj:fullFrame(), {
+      developerExtrasEnabled = false,
+      suppressesIncrementalRendering = true,
+    }, ucc)
+    shield:windowStyle({"borderless"})
+    shield:level(hs.drawing.windowLevels.modalPanel)
+    shield:transparent(true)
+    shield:allowTextEntry(false)
+    shield:bringToFront(true)
+    shield:html(SHIELD_HTML)
+    shield:show()
+    table.insert(shieldViews, shield)
+  end
+
   webview = hs.webview.new(rect, {
     developerExtrasEnabled = true,
     suppressesIncrementalRendering = true,
@@ -651,9 +843,10 @@ local function show()
   webview:shadow(true)
 
   if not cache then
-    local raw = shell(shq(SCRIPT) .. " json 2>/dev/null") or "[]"
+    local raw = shell(shq(SCRIPT) .. " json fast 2>/dev/null") or "[]"
     local ok, data = pcall(hs.json.decode, raw)
-    cache = buildTreeFromSessions(ok and data or {})
+    if ok then mergeSessionSnapshot(data, "fast") end
+    cache = cache or buildTreeFromSessions({})
   end
 
   local treeJson = hs.json.encode(cache)
@@ -665,7 +858,8 @@ local function show()
   end)
 
   startCacheTimer(config.cache_interval_open)
-  hs.timer.doAfter(0.1, refreshCache)
+  hs.timer.doAfter(0.05, function() refreshCache("fast") end)
+  hs.timer.doAfter(0.4, function() refreshCache("full") end)
 
   -- Auto-hide when any other app activates.
   hasFocused = false
@@ -692,7 +886,7 @@ if config.hotkey and config.hotkey.mods and config.hotkey.key then
 end
 
 -- One-shot cache warm so the first hotkey press is instant.
-refreshCache()
+refreshCache("full")
 
 if config.show_load_alert then
   local label = "⌘⌥⌃" .. (config.hotkey and config.hotkey.key or "?")

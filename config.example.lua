@@ -12,6 +12,9 @@ return {
 
   -- Background refresh cadence (seconds) while the picker is open.
   cache_interval_open = 5,
+  cache_interval_fast = 1.5,
+  stale_ttl_seconds   = 15,
+  stale_miss_limit    = 2,
 
   -- Picker window sizing.
   width_max     = 900,   -- px cap

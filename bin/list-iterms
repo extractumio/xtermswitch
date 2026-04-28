@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Usage:
 #   ~/list-iterms                  # YAML inventory of every iTerm2 session
-#   ~/list-iterms json             # flat JSON array (one entry per session) for chooser UIs
+#   ~/list-iterms json [fast|full]  # flat JSON array (one entry per session) for chooser UIs
 #   ~/list-iterms focus <uid>      # bring the session with that unique-id to front
 #
 # Each session in the YAML carries `session_uid` (stable across reorders) and
@@ -241,7 +241,8 @@ cleanup_text_cache() {
 trap cleanup_text_cache EXIT
 
 # ---------- remote tmux-CC enrichment ----------
-declare -A REMOTE_PANE_CWD REMOTE_PANE_CMD REMOTE_PANE_AGENT REMOTE_PANE_LAST REMOTE_PANE_PROC
+declare -A REMOTE_PANE_CWD REMOTE_PANE_CMD REMOTE_PANE_AGENT REMOTE_PANE_LAST REMOTE_PANE_PROC REMOTE_PANE_ID
+declare -A REMOTE_TITLE_COUNT REMOTE_TITLE_HOST
 REMOTE_FETCHED=""
 
 fetch_remote_panes() {
@@ -267,19 +268,23 @@ while IFS="|" read pane_id title path cmd pid; do
     if echo "$cm" | grep -qE "(^| |/)codex( |$)"; then agent=codex; break; fi
   done
   cap=$(tmux capture-pane -p -e -t "$pane_id" 2>/dev/null | tail -40 | base64 | tr -d "\n")
-  printf "%s\037%s\037%s\037%s\037%s\037%s\n" "$title" "$path" "$cmd" "$pid" "$agent" "$cap"
+  printf "%s\037%s\037%s\037%s\037%s\037%s\037%s\n" "$pane_id" "$title" "$path" "$cmd" "$pid" "$agent" "$cap"
 done
 ' 2>/dev/null)
-  while IFS=$'\037' read -r title path cmd pid agent cap_b64; do
+  while IFS=$'\037' read -r pane_id title path cmd pid agent cap_b64; do
     [ -z "$title" ] && continue
-    REMOTE_PANE_CWD["$title"]=$path
-    REMOTE_PANE_CMD["$title"]=$cmd
-    REMOTE_PANE_AGENT["$title"]=$agent
+    local key="$host"$'\036'"$title"
+    REMOTE_PANE_ID["$key"]=$pane_id
+    REMOTE_PANE_CWD["$key"]=$path
+    REMOTE_PANE_CMD["$key"]=$cmd
+    REMOTE_PANE_AGENT["$key"]=$agent
+    REMOTE_TITLE_COUNT["$title"]=$((${REMOTE_TITLE_COUNT["$title"]:-0} + 1))
+    REMOTE_TITLE_HOST["$title"]=$host
     if [ -n "$cap_b64" ]; then
       local analysis
       analysis=$(printf '%s' "$cap_b64" | base64 -D 2>/dev/null | analyze_screen)
-      REMOTE_PANE_LAST["$title"]=${analysis%$'\x1f'*}
-      REMOTE_PANE_PROC["$title"]=${analysis##*$'\x1f'}
+      REMOTE_PANE_LAST["$key"]=${analysis%$'\x1f'*}
+      REMOTE_PANE_PROC["$key"]=${analysis##*$'\x1f'}
     fi
   done <<< "$out"
 }
@@ -287,22 +292,28 @@ done
 # ---------- json subcommand (for Hammerspoon chooser etc.) ----------
 if [ "${1-}" = "json" ]; then
   jq_escape() { python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${1-}"; }
+  mode=${2:-full}
 
   raw=$(collect)
-  prefetch_texts  # one big osascript for all session screens
+  if [ "$mode" != "fast" ]; then
+    prefetch_texts  # one big osascript for all session screens
+  fi
 
   # Detect tmux-CC controllers globally (iTerm hides the controller session,
   # so we can't find it via AppleScript — scan ps instead).
   controllers=$(ps -axo command= 2>/dev/null \
     | awk '/^ssh / && /tmux/ && /-CC/ {
         for (i=2; i<=NF; i++) if ($i !~ /^-/ && $i != "tmux") { print $i; break }
-      }')
+      }' | sort -u)
   cc_count=$(printf '%s\n' "$controllers" | grep -c .)
   sole_host=""
   [ "$cc_count" = "1" ] && sole_host=$(printf '%s\n' "$controllers" | head -1)
 
-  # Pre-fetch remote panes for the sole host (single SSH round-trip).
-  [ -n "$sole_host" ] && fetch_remote_panes "$sole_host"
+  if [ "$mode" != "fast" ]; then
+    while IFS= read -r controller_host; do
+      [ -n "$controller_host" ] && fetch_remote_panes "$controller_host"
+    done <<< "$controllers"
+  fi
 
   echo "["
   first=1
@@ -312,21 +323,41 @@ if [ "${1-}" = "json" ]; then
     if [ -z "$tty" ] || [ "$tty" = "missing value" ]; then
       ttyname=""; virtual="true"
       cwd=""; host="$sole_host"; is_cc="false"
-      interesting=""; agent=""; cpu=0
-      if [ -n "$sole_host" ]; then
-        cwd=${REMOTE_PANE_CWD["$name"]:-}
-        interesting=${REMOTE_PANE_CMD["$name"]:-}
-        agent=${REMOTE_PANE_AGENT["$name"]:-}
-        last_line=${REMOTE_PANE_LAST["$name"]:-}
-        processing=${REMOTE_PANE_PROC["$name"]:-false}
+      interesting=""; agent=""; cpu=0; tmux_pane_id=""; enriched="false"
+      if [ "$mode" != "fast" ]; then
+        # iTerm exposes tmux-CC virtual panes without a tty. Its AppleScript
+        # name usually matches tmux pane_title. Use it only when unique across
+        # fetched controller hosts; ambiguous titles remain visible but stale
+        # enrichment is intentionally left blank rather than misattributed.
+        if [ "${REMOTE_TITLE_COUNT["$name"]:-0}" = "1" ]; then
+          host=${REMOTE_TITLE_HOST["$name"]:-$host}
+        fi
+        if [ -n "$host" ]; then
+          key="$host"$'\036'"$name"
+          tmux_pane_id=${REMOTE_PANE_ID["$key"]:-}
+          if [ -n "$tmux_pane_id" ]; then
+            enriched="true"
+            cwd=${REMOTE_PANE_CWD["$key"]:-}
+            interesting=${REMOTE_PANE_CMD["$key"]:-}
+            agent=${REMOTE_PANE_AGENT["$key"]:-}
+            last_line=${REMOTE_PANE_LAST["$key"]:-}
+            processing=${REMOTE_PANE_PROC["$key"]:-false}
+          fi
+        fi
       fi
     else
       ttyname=$(basename "$tty")
       virtual="false"
-      IFS='|' read -r cwd host is_cc interesting agent cpu < <(inspect_tty "$ttyname")
+      tmux_pane_id=""
+      if [ "$mode" = "fast" ]; then
+        cwd=""; host=""; is_cc="false"; interesting=""; agent=""; cpu=0; enriched="false"
+      else
+        IFS='|' read -r cwd host is_cc interesting agent cpu < <(inspect_tty "$ttyname")
+        enriched="true"
+      fi
       # Only capture/analyze the screen for sessions where it actually adds info
       # (agents or the "interesting" non-shell processes). Saves ~50% on idle shells.
-      if [ -n "$agent" ] || [ -n "$interesting" ]; then
+      if [ "$mode" != "fast" ] && { [ -n "$agent" ] || [ -n "$interesting" ]; }; then
         analysis=$(get_iterm_text "$uid" | analyze_screen)
         last_line=${analysis%$'\x1f'*}
         processing=${analysis##*$'\x1f'}
@@ -334,19 +365,21 @@ if [ "${1-}" = "json" ]; then
     fi
     [ $first -eq 0 ] && echo ","
     first=0
-    printf '  {"win":%s,"tab":%s,"sess":%s,"iterm_window_id":%s,"uid":%s,"tty":%s,"title":%s,"cwd":%s,"ssh_host":%s,"tmux_cc_controller":%s,"tmux_cc_virtual":%s,"running":%s,"agent":%s,"cpu":%s,"last_line":%s,"processing":%s}' \
+    printf '  {"win":%s,"tab":%s,"sess":%s,"iterm_window_id":%s,"uid":%s,"tty":%s,"title":%s,"cwd":%s,"ssh_host":%s,"tmux_pane_id":%s,"tmux_cc_controller":%s,"tmux_cc_virtual":%s,"running":%s,"agent":%s,"cpu":%s,"last_line":%s,"processing":%s,"enriched":%s}' \
       "$win" "$tab" "$sess" "$wid" \
       "$(jq_escape "$uid")" \
       "$(jq_escape "$ttyname")" \
       "$(jq_escape "$name")" \
       "$(jq_escape "$cwd")" \
       "$(jq_escape "$host")" \
+      "$(jq_escape "$tmux_pane_id")" \
       "$is_cc" "$virtual" \
       "$(jq_escape "$interesting")" \
       "$(jq_escape "$agent")" \
       "${cpu:-0}" \
       "$(jq_escape "$last_line")" \
-      "${processing:-false}"
+      "${processing:-false}" \
+      "${enriched:-false}"
   done <<< "$raw"
   echo
   echo "]"
