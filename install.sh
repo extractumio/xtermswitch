@@ -13,6 +13,7 @@ LOAD_LINE="dofile(\"$DIR/xtermswitch.lua\")"
 
 mkdir -p "$HS_DIR"
 chmod +x "$DIR/bin/list-iterms"
+chmod +x "$DIR/iterm/xtermswitch_daemon.py"
 
 if [ ! -f "$HS_INIT" ]; then
   cat > "$HS_INIT" <<EOF
@@ -40,6 +41,11 @@ if [ ! -f "$HOME/.xtermswitch/config.lua" ]; then
   echo "Wrote default config to ~/.xtermswitch/config.lua"
 fi
 
+ITERM_AUTOLAUNCH="$HOME/Library/Application Support/iTerm2/Scripts/AutoLaunch"
+mkdir -p "$ITERM_AUTOLAUNCH"
+ln -sfn "$DIR/iterm/xtermswitch_daemon.py" "$ITERM_AUTOLAUNCH/xtermswitch_daemon.py"
+echo "Linked iTerm2 daemon into AutoLaunch scripts."
+
 cat <<EOF
 
 Done. Reload Hammerspoon (menu bar → Reload Config) and press ⌘⌥⌃T.
@@ -47,6 +53,10 @@ Done. Reload Hammerspoon (menu bar → Reload Config) and press ⌘⌥⌃T.
 Files:
   module:  $DIR/xtermswitch.lua
   script:  $DIR/bin/list-iterms
+  daemon:  $ITERM_AUTOLAUNCH/xtermswitch_daemon.py
   config:  $HOME/.xtermswitch/config.lua
   hammerspoon init: $HS_INIT
+
+Enable iTerm2's Python API, then restart iTerm2 or run the daemon from
+Scripts → AutoLaunch → xtermswitch_daemon.py.
 EOF

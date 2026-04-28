@@ -26,6 +26,8 @@ require "hs.window"
 require "hs.screen"
 require "hs.drawing"
 require "hs.application"
+require "hs.fs"
+require "hs.pathwatcher"
 
 -- ============================================================
 -- Self-location & config
@@ -42,6 +44,9 @@ local HOME = os.getenv("HOME")
 local config = {
   hotkey              = { mods = {"cmd", "alt", "ctrl"}, key = "T" },
   list_iterms         = DIR .. "bin/list-iterms",
+  use_iterm_daemon    = true,
+  iterm_daemon_cache  = HOME .. "/.cache/xtermswitch/sessions.json",
+  iterm_daemon_max_age = 10,
   cache_interval_open = 5,
   cache_interval_fast = 1.5,
   stale_ttl_seconds   = 15,
@@ -622,6 +627,7 @@ document.addEventListener('keydown', e => {
 
 local webview, ucc, appWatcher, hasFocused
 local shieldViews = {}
+local daemonWatcher, daemonWatchDebounce
 
 -- ============================================================
 -- Cache: zero work while idle. Refresh only on demand.
@@ -729,6 +735,64 @@ local function rebuildAndPushToWebview()
   webview:evaluateJavaScript("if(window.applyData) applyData('" .. treeJson .. "')")
 end
 
+local function dirname(path)
+  return tostring(path):match("(.+)/[^/]+$") or "."
+end
+
+local function readFile(path)
+  local f = io.open(path, "r")
+  if not f then return nil end
+  local data = f:read("*a")
+  f:close()
+  return data
+end
+
+local function loadDaemonCache(allowStale)
+  if not config.use_iterm_daemon then return false end
+  local path = config.iterm_daemon_cache
+  if not path or path == "" then return false end
+  local raw = readFile(path)
+  if not raw or raw == "" then return false end
+  local ok, decoded = pcall(hs.json.decode, raw)
+  if not ok or type(decoded) ~= "table" then return false end
+  local updated = tonumber(decoded.updated_at) or 0
+  local fresh = updated > 0 and (os.time() - updated) <= (config.iterm_daemon_max_age or 10)
+  if not fresh and not allowStale then return false end
+  local sessions = decoded.sessions or decoded
+  if type(sessions) ~= "table" then return false end
+  local changed = mergeSessionSnapshot(sessions, "daemon")
+  if changed and webview then rebuildAndPushToWebview() end
+  _G.itermDaemonCache = decoded
+  return changed
+end
+
+local function startDaemonWatcher()
+  if daemonWatcher or not config.use_iterm_daemon then return end
+  local cachePath = config.iterm_daemon_cache
+  if not cachePath or cachePath == "" then return end
+  daemonWatcher = hs.pathwatcher.new(dirname(cachePath), function(files)
+    local sawCache = false
+    for _, f in ipairs(files or {}) do
+      if f == cachePath or tostring(f):match("/sessions%.json$") then
+        sawCache = true
+        break
+      end
+    end
+    if not sawCache then return end
+    if daemonWatchDebounce then daemonWatchDebounce:stop() end
+    daemonWatchDebounce = hs.timer.doAfter(0.05, function()
+      daemonWatchDebounce = nil
+      loadDaemonCache(false)
+    end)
+  end)
+  daemonWatcher:start()
+end
+
+local function stopDaemonWatcher()
+  if daemonWatchDebounce then daemonWatchDebounce:stop(); daemonWatchDebounce = nil end
+  if daemonWatcher then daemonWatcher:stop(); daemonWatcher = nil end
+end
+
 local activeTask = nil
 local pendingRefresh = nil
 local function refreshCache(mode, onDone)
@@ -737,6 +801,10 @@ local function refreshCache(mode, onDone)
     mode = "full"
   end
   mode = mode or "full"
+  if loadDaemonCache(false) then
+    if onDone then onDone() end
+    return
+  end
   if activeTask then
     if mode == "full" or not pendingRefresh then pendingRefresh = mode end
     return
@@ -767,13 +835,21 @@ end
 
 local function startCacheTimer(interval)
   if cacheTimer then cacheTimer:stop() end
-  cacheTimer = hs.timer.doEvery(interval, function() refreshCache("full") end)
   if fastCacheTimer then fastCacheTimer:stop() end
-  fastCacheTimer = hs.timer.doEvery(config.cache_interval_fast or 1.5, function() refreshCache("fast") end)
+  if loadDaemonCache(false) then
+    startDaemonWatcher()
+    cacheTimer = hs.timer.doEvery(config.iterm_daemon_max_age or interval, function()
+      if not loadDaemonCache(false) then refreshCache("full") end
+    end)
+  else
+    cacheTimer = hs.timer.doEvery(interval, function() refreshCache("full") end)
+    fastCacheTimer = hs.timer.doEvery(config.cache_interval_fast or 1.5, function() refreshCache("fast") end)
+  end
 end
 local function stopCacheTimer()
   if cacheTimer then cacheTimer:stop(); cacheTimer = nil end
   if fastCacheTimer then fastCacheTimer:stop(); fastCacheTimer = nil end
+  stopDaemonWatcher()
 end
 
 local function close()
@@ -843,9 +919,11 @@ local function show()
   webview:shadow(true)
 
   if not cache then
-    local raw = shell(shq(SCRIPT) .. " json fast 2>/dev/null") or "[]"
-    local ok, data = pcall(hs.json.decode, raw)
-    if ok then mergeSessionSnapshot(data, "fast") end
+    if not loadDaemonCache(true) then
+      local raw = shell(shq(SCRIPT) .. " json fast 2>/dev/null") or "[]"
+      local ok, data = pcall(hs.json.decode, raw)
+      if ok then mergeSessionSnapshot(data, "fast") end
+    end
     cache = cache or buildTreeFromSessions({})
   end
 
@@ -858,8 +936,12 @@ local function show()
   end)
 
   startCacheTimer(config.cache_interval_open)
-  hs.timer.doAfter(0.05, function() refreshCache("fast") end)
-  hs.timer.doAfter(0.4, function() refreshCache("full") end)
+  hs.timer.doAfter(0.05, function()
+    if not loadDaemonCache(false) then refreshCache("fast") end
+  end)
+  hs.timer.doAfter(0.4, function()
+    if not loadDaemonCache(false) then refreshCache("full") end
+  end)
 
   -- Auto-hide when any other app activates.
   hasFocused = false

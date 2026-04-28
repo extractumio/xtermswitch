@@ -43,6 +43,8 @@ Type a few letters of a path or a hostname; press Enter; you're there.
 - **One hotkey, one keypress to focus** — default `⌘⌥⌃T`, fully configurable
 - **Grouped by location** — Local windows, then each SSH host, then tmux-CC
   controllers
+- **Event-based iTerm2 cache** — optional iTerm2 Python daemon updates the
+  picker cache on session, location, prompt, and screen events
 - **Smart fuzzy search** across title, cwd, host, running command
 - **Agent detection** — flags `claude` / `codex` sessions, shows live activity
 - **Last-line preview** — strips ANSI/box-drawing noise, surfaces real output
@@ -55,8 +57,9 @@ Type a few letters of a path or a hostname; press Enter; you're there.
 ## Requirements
 
 - macOS
-- [iTerm2](https://iterm2.com/) (Preferences → General → Magic → "Enable Python API"
-  is **not** required; AppleScript is.)
+- [iTerm2](https://iterm2.com/) with Preferences → General → Magic →
+  **Enable Python API** for event-based updates. AppleScript is still used as
+  a fallback collector and for focusing selected sessions.
 - [Hammerspoon](https://www.hammerspoon.org/)
 - `python3`, `osascript`, standard `bash` — preinstalled on macOS
 
@@ -72,8 +75,14 @@ Then **Reload Config** from the Hammerspoon menubar icon. Press `⌘⌥⌃T`.
 The installer is idempotent — re-running it just verifies the wiring. It:
 
 1. ensures `bin/list-iterms` is executable
-2. appends a one-line loader to `~/.hammerspoon/init.lua` (or creates one)
-3. seeds `~/.xtermswitch/config.lua` from the example
+2. links the iTerm2 Python daemon into iTerm2's AutoLaunch scripts
+3. appends a one-line loader to `~/.hammerspoon/init.lua` (or creates one)
+4. seeds `~/.xtermswitch/config.lua` from the example
+
+After installing, enable iTerm2's Python API and restart iTerm2, or run
+`Scripts → AutoLaunch → xtermswitch_daemon.py` from iTerm2's menu. The daemon
+writes `~/.cache/xtermswitch/sessions.json`; Hammerspoon watches that file
+while the picker is open.
 
 ## Configuration
 
@@ -83,6 +92,9 @@ Edit `~/.xtermswitch/config.lua`. The most common knob is the hotkey:
 return {
   hotkey = { mods = {"cmd", "alt", "ctrl"}, key = "T" },
   -- list_iterms = "/usr/local/bin/list-iterms",   -- override script path
+  use_iterm_daemon     = true,
+  iterm_daemon_cache   = os.getenv("HOME") .. "/.cache/xtermswitch/sessions.json",
+  iterm_daemon_max_age = 10,
   cache_interval_open = 5,
   cache_interval_fast = 1.5,
   stale_ttl_seconds   = 15,

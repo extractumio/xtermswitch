@@ -10,7 +10,13 @@ return {
   -- elsewhere on PATH.
   -- list_iterms = "/usr/local/bin/list-iterms",
 
-  -- Background refresh cadence (seconds) while the picker is open.
+  -- Prefer the iTerm2 Python daemon cache. The daemon writes this file on
+  -- iTerm2 events; the bash collector remains a fallback if it is stale.
+  use_iterm_daemon     = true,
+  iterm_daemon_cache   = os.getenv("HOME") .. "/.cache/xtermswitch/sessions.json",
+  iterm_daemon_max_age = 10,
+
+  -- Fallback refresh cadence (seconds) while the picker is open.
   cache_interval_open = 5,
   cache_interval_fast = 1.5,
   stale_ttl_seconds   = 15,

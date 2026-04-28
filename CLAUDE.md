@@ -10,6 +10,8 @@ xtermswitch/
 ├── xtermswitch.lua          Hammerspoon module — UI, hotkey, cache
 ├── bin/
 │   └── list-iterms          Bash + AppleScript + Python data collector
+├── iterm/
+│   └── xtermswitch_daemon.py iTerm2 Python event daemon
 ├── config.example.lua       Default user config (copied to ~/.xtermswitch/)
 ├── examples/
 │   └── init.lua             Sample ~/.hammerspoon/init.lua
@@ -19,20 +21,16 @@ xtermswitch/
 └── LICENSE                  MIT
 ```
 
-Two processes, three handoffs:
+Primary event path plus fallback collector:
 
 ```
-   ┌──────────────────────────┐         ┌──────────────────────────┐
-   │  Hammerspoon (Lua)       │         │  bin/list-iterms (bash)  │
-   │  xtermswitch.lua         │ ──fork▶ │  (AppleScript + ps/lsof  │
-   │  • hotkey                │         │   + Python ANSI parser   │
-   │  • webview UI            │ ◀─JSON─ │   + ssh tmux capture)    │
-   │  • cache                 │         │                          │
-   └────────────┬─────────────┘         └──────────────────────────┘
-                │
-                │ user clicks/presses Enter
-                ▼
-        list-iterms focus <uid>  ──▶  AppleScript: select that session
+   iTerm2 Python daemon ──events──▶ ~/.cache/xtermswitch/sessions.json
+                                      ▲
+                                      │ file watch/read
+   Hammerspoon popup ◀────────────────┘
+          │
+          ├─fallback fork──▶ bin/list-iterms json [fast|full]
+          └─focus─────────▶ bin/list-iterms focus <uid>
 ```
 
 ## Components
@@ -145,6 +143,27 @@ Performance tricks:
   call sets up a multiplex socket at `/tmp/cm-list-iterms-%r@%h:%p`;
   subsequent calls within 5 minutes reuse it.
 
+### `iterm/xtermswitch_daemon.py` — iTerm2 event cache
+
+Long-running iTerm2 Python script linked by `install.sh` into:
+
+```
+~/Library/Application Support/iTerm2/Scripts/AutoLaunch/xtermswitch_daemon.py
+```
+
+It subscribes to iTerm2 notifications for session creation/termination,
+layout/focus changes, location changes, prompt notifications, screen updates,
+and custom escape sequences. It writes an atomic JSON cache to:
+
+```
+~/.cache/xtermswitch/sessions.json
+```
+
+Hammerspoon prefers this cache when `use_iterm_daemon = true` and the cache is
+younger than `iterm_daemon_max_age`. While the picker is open, Hammerspoon
+watches the cache file and only falls back to `bin/list-iterms` when the cache
+is missing or stale.
+
 ### Data shape (JSON)
 
 The `json` subcommand emits an array of:
@@ -244,6 +263,9 @@ Recognized keys:
 | `hotkey.mods`         | array   | `{"cmd","alt","ctrl"}`                     | `hs.hotkey.bind` modifiers                  |
 | `hotkey.key`          | string  | `"T"`                                      | single key                                  |
 | `list_iterms`         | string  | `<DIR>/bin/list-iterms`                    | absolute path to data collector             |
+| `use_iterm_daemon`    | bool    | `true`                                     | prefer iTerm2 Python event cache            |
+| `iterm_daemon_cache`  | string  | `~/.cache/xtermswitch/sessions.json`       | event cache path                            |
+| `iterm_daemon_max_age`| number  | `10`                                       | stale threshold for daemon cache            |
 | `cache_interval_open` | number  | `5`                                        | seconds, while picker open                  |
 | `cache_interval_fast` | number  | `1.5`                                      | cheap identity refresh cadence while open   |
 | `stale_ttl_seconds`   | number  | `15`                                       | seconds to retain temporarily missed rows   |
@@ -324,6 +346,8 @@ emit JSON (run the bash script directly to see stderr).
 |-----------------------------------|---------------------------------------|
 | `~/.hammerspoon/init.lua`         | `install.sh` creates or appends to it |
 | `~/.xtermswitch/config.lua`       | `install.sh` seeds from the example   |
+| `~/Library/Application Support/iTerm2/Scripts/AutoLaunch/xtermswitch_daemon.py` | `install.sh` symlinks the daemon |
+| `~/.cache/xtermswitch/sessions.json` | iTerm2 daemon writes event cache |
 | `/tmp/list-iterms-texts.XXXXXX/`  | Per-run screen-text cache; cleaned on script exit (`trap`) |
 | `/tmp/cm-list-iterms-*`           | SSH ControlMaster sockets; auto-expire after 5 min idle |
 
