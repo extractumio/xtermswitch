@@ -2,8 +2,13 @@
 -- Hotkey-driven, glassy webview UI with grouping by local windows / SSH hosts,
 -- agent (claude/codex) detection, last-line preview, live cache while open.
 --
+-- Copyright (C) 2026 Gregory Zemskov <info@extractum.io>
+-- SPDX-License-Identifier: AGPL-3.0-or-later
+-- Licensed under the GNU Affero General Public License v3.0 or later.
+-- See the LICENSE file at the project root for the full text.
+--
 -- Default install: clone the repo, then add to ~/.hammerspoon/init.lua:
---     dofile(os.getenv("HOME") .. "/EXTRACTUM/xtermswitch/xtermswitch.lua")
+--     dofile(os.getenv("HOME") .. "/src/xtermswitch/xtermswitch.lua")
 --
 -- User config (optional): ~/.xtermswitch/config.lua returning a table of
 -- overrides, e.g.:
@@ -465,7 +470,7 @@ function render() {
         const active = !!s.processing;
         r.className = `row ${s.kind} ${isAgent?'has-claude':''} ${s.stale?'stale':''}`;
         r.dataset.uid = s.uid;
-        // Host context lives in the group header (e.g. "tmux-CC · 10.195.48.28"),
+        // Host context lives in the group header (e.g. "tmux-CC · host"),
         // so the row only needs to show its cwd.
         const sub = s.cwd ? `<span class="cwd">${esc(s.cwd)}</span>` : '';
         const cpuStr = (s.cpu >= 5) ? ` ${s.cpu.toFixed(0)}%` : '';
@@ -728,11 +733,15 @@ local function mergeSessionSnapshot(data, mode)
   return true
 end
 
+local lastPushedJson = nil
 local function rebuildAndPushToWebview()
   if not cache or not webview then return end
   local treeJson = hs.json.encode(cache)
-  treeJson = treeJson:gsub("\\", "\\\\"):gsub("'", "\\'"):gsub("\n", "\\n")
-  webview:evaluateJavaScript("if(window.applyData) applyData('" .. treeJson .. "')")
+  if treeJson == lastPushedJson then return end
+  lastPushedJson = treeJson
+  -- Wrap as a JS string literal via a second encode; this handles \r,
+  -- control chars, and non-BMP escapes that hand-rolled gsubs miss.
+  webview:evaluateJavaScript("if(window.applyData) applyData(" .. hs.json.encode(treeJson) .. ")")
 end
 
 local function dirname(path)
@@ -762,7 +771,6 @@ local function loadDaemonCache(allowStale)
   if type(sessions) ~= "table" then return false end
   local changed = mergeSessionSnapshot(sessions, "daemon")
   if changed and webview then rebuildAndPushToWebview() end
-  _G.itermDaemonCache = decoded
   return changed
 end
 
@@ -841,10 +849,11 @@ local function startCacheTimer(interval)
     cacheTimer = hs.timer.doEvery(config.iterm_daemon_max_age or interval, function()
       if not loadDaemonCache(false) then refreshCache("full") end
     end)
-  else
-    cacheTimer = hs.timer.doEvery(interval, function() refreshCache("full") end)
-    fastCacheTimer = hs.timer.doEvery(config.cache_interval_fast or 1.5, function() refreshCache("fast") end)
+    return true
   end
+  cacheTimer = hs.timer.doEvery(interval, function() refreshCache("full") end)
+  fastCacheTimer = hs.timer.doEvery(config.cache_interval_fast or 1.5, function() refreshCache("fast") end)
+  return false
 end
 local function stopCacheTimer()
   if cacheTimer then cacheTimer:stop(); cacheTimer = nil end
@@ -864,11 +873,17 @@ local function close()
   shieldViews = {}
   ucc = nil
   hasFocused = false
+  lastPushedJson = nil
   stopCacheTimer()
 end
 
 local function focusUid(uid)
-  hs.task.new(SCRIPT, function() end, {"focus", uid}):start()
+  hs.task.new(SCRIPT, function(exitCode, _stdout, stderr)
+    if exitCode ~= 0 then
+      print("xtermswitch focus: rc=" .. tostring(exitCode) ..
+            " err=" .. tostring(stderr):sub(1, 200))
+    end
+  end, {"focus", uid}):start()
   close()
 end
 
@@ -935,13 +950,13 @@ local function show()
     if webview and webview:hswindow() then webview:hswindow():focus() end
   end)
 
-  startCacheTimer(config.cache_interval_open)
-  hs.timer.doAfter(0.05, function()
-    if not loadDaemonCache(false) then refreshCache("fast") end
-  end)
-  hs.timer.doAfter(0.4, function()
-    if not loadDaemonCache(false) then refreshCache("full") end
-  end)
+  -- Daemon path: the file watcher covers updates. Fallback path: prime
+  -- the picker with a fast pass, then a full pass for enrichment.
+  local usingDaemon = startCacheTimer(config.cache_interval_open)
+  if not usingDaemon then
+    hs.timer.doAfter(0.05, function() refreshCache("fast") end)
+    hs.timer.doAfter(0.4,  function() refreshCache("full") end)
+  end
 
   -- Auto-hide when any other app activates.
   hasFocused = false

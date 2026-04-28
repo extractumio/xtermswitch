@@ -12,7 +12,7 @@ preview of what's happening on screen. Hit Enter to jump there.
    ├────────────────────────────────────────────────────────┤
    │  LOCAL                                              7  │
    │   iTerm 17                                             │
-   │     🖥  ~/EXTRACTUM/xtermswitch       claude  ●        │
+   │     🖥  ~/src/xtermswitch             claude  ●        │
    │     🖥  ~/concrete_jungle             zsh              │
    │   iTerm 18                                             │
    │     🖥  ~                             ssh              │
@@ -50,8 +50,8 @@ Type a few letters of a path or a hostname; press Enter; you're there.
 - **Last-line preview** — strips ANSI/box-drawing noise, surfaces real output
 - **Remote tmux-CC enrichment** — single batched SSH round-trip per host;
   works even with 30+ remote panes
-- **Zero idle cost** — no polling, no background work while the picker is
-  closed; the cache only refreshes while you're looking at it
+- **Low idle cost** — the iTerm2 daemon updates on iTerm events; fallback
+  AppleScript/SSH polling runs only while the picker is open
 - **Glass UI** that floats over any app, dismisses on focus loss
 
 ## Requirements
@@ -66,23 +66,34 @@ Type a few letters of a path or a hostname; press Enter; you're there.
 ## Install
 
 ```bash
-git clone https://github.com/<you>/xtermswitch ~/EXTRACTUM/xtermswitch
-~/EXTRACTUM/xtermswitch/install.sh
+git clone https://github.com/extractumio/xtermswitch.git ~/src/xtermswitch
+~/src/xtermswitch/install.sh
 ```
 
-Then **Reload Config** from the Hammerspoon menubar icon. Press `⌘⌥⌃T`.
+You can clone into any directory; the installer records the absolute path to
+that checkout in `~/.hammerspoon/init.lua`.
 
-The installer is idempotent — re-running it just verifies the wiring. It:
+The installer is idempotent. Re-running it updates the wiring for the current
+checkout and keeps existing user config intact. It:
 
-1. ensures `bin/list-iterms` is executable
-2. links the iTerm2 Python daemon into iTerm2's AutoLaunch scripts
-3. appends a one-line loader to `~/.hammerspoon/init.lua` (or creates one)
-4. seeds `~/.xtermswitch/config.lua` from the example
+1. checks required command-line tools
+2. creates `~/.hammerspoon`, `~/.xtermswitch`, and `~/.cache/xtermswitch`
+3. ensures `bin/list-iterms` and the iTerm2 daemon are executable
+4. links the iTerm2 daemon into `~/Library/Application Support/iTerm2/Scripts/AutoLaunch/`
+5. appends a one-line loader to `~/.hammerspoon/init.lua` (or creates one)
+6. seeds `~/.xtermswitch/config.lua` from the example if it does not exist
 
-After installing, enable iTerm2's Python API and restart iTerm2, or run
-`Scripts → AutoLaunch → xtermswitch_daemon.py` from iTerm2's menu. The daemon
-writes `~/.cache/xtermswitch/sessions.json`; Hammerspoon watches that file
-while the picker is open.
+First-run app steps:
+
+1. In iTerm2, enable Settings/Preferences → General → Magic → **Enable Python API**.
+2. Restart iTerm2, or run `Scripts → AutoLaunch → xtermswitch_daemon.py`.
+3. In Hammerspoon, choose **Reload Config** from the menubar.
+4. If macOS prompts for Automation access, allow Hammerspoon to control iTerm2.
+5. Press `⌘⌥⌃T`.
+
+The daemon writes `~/.cache/xtermswitch/sessions.json`; Hammerspoon watches
+that file while the picker is open and falls back to the bash collector if the
+daemon cache is missing or stale.
 
 ## Configuration
 
@@ -126,9 +137,9 @@ See [`config.example.lua`](config.example.lua) for the full list.
 The data collector is useful on its own:
 
 ```bash
-~/EXTRACTUM/xtermswitch/bin/list-iterms          # full YAML inventory
-~/EXTRACTUM/xtermswitch/bin/list-iterms json     # JSON for chooser UIs
-~/EXTRACTUM/xtermswitch/bin/list-iterms focus <session-uid>
+./bin/list-iterms          # full YAML inventory
+./bin/list-iterms json     # JSON for chooser UIs
+./bin/list-iterms focus <session-uid>
 ```
 
 ## Privacy
@@ -144,11 +155,23 @@ SSH connections to hosts you already trust. See
 - **Picker is empty** — make sure iTerm has at least one window open and
   AppleScript automation is allowed (System Settings → Privacy & Security →
   Automation → Hammerspoon → iTerm2).
+- **Daemon cache is not updating** — enable iTerm2's Python API, then restart
+  iTerm2 or run `Scripts → AutoLaunch → xtermswitch_daemon.py`.
 - **Remote panes show no `cwd` or `last line`** — the host needs `tmux` and
   `python3`, and SSH needs to connect with `BatchMode=yes` (key auth, no
   password prompt). Set up `ssh-agent` or `ControlMaster`.
 - **Hotkey conflicts** — change `hotkey` in `~/.xtermswitch/config.lua`.
 
+## Author
+
+**Gregory Zemskov** — [info@extractum.io](mailto:info@extractum.io) ·
+[linkedin.com/in/gregzem](https://www.linkedin.com/in/gregzem/)
+
 ## License
 
-MIT — see [LICENSE](LICENSE).
+GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later) —
+see [LICENSE](LICENSE).
+
+If you run a modified version of xtermswitch and let other users interact
+with it over a network, the AGPL requires that you offer them the
+corresponding source code of your modifications.

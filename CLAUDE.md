@@ -18,7 +18,7 @@ xtermswitch/
 ├── install.sh               Idempotent installer
 ├── README.md                Product-facing docs
 ├── CLAUDE.md                This file
-└── LICENSE                  MIT
+└── LICENSE                  AGPL-3.0-or-later
 ```
 
 Primary event path plus fallback collector:
@@ -210,12 +210,10 @@ opaque `uid` for round-tripping back to `list-iterms focus`.
 ### Module load (Hammerspoon `hs.reload()` or first start)
 
 1. `~/.hammerspoon/init.lua` runs. It starts a pathwatcher that reloads
-   on any `*.lua` change in `~/.hammerspoon/`. **Note:** changes inside
-   `~/EXTRACTUM/xtermswitch/` do *not* trigger reload; this is intentional
-   to avoid surprise reloads while editing project files. To pick up
-   changes there, edit `~/.hammerspoon/init.lua` (touch it) or use the
-   menubar's Reload Config.
-2. `dofile("/Users/.../xtermswitch.lua")` runs. The module:
+   on any `*.lua` change in `~/.hammerspoon/`. Changes inside the checkout
+   do not automatically reload Hammerspoon; use the menubar's Reload Config
+   after editing this project.
+2. The checkout-specific `dofile(".../xtermswitch.lua")` line runs. The module:
    - resolves its own dir, loads optional user config
    - `chmod +x`'s `bin/list-iterms` (idempotent, safe)
    - binds the global hotkey
@@ -225,13 +223,13 @@ opaque `uid` for round-tripping back to `list-iterms focus`.
 ### Picker open (`itermShow` / hotkey)
 
 1. `close()` — defensive teardown if a picker is somehow already up.
-2. Compute screen geometry; build webview at `modalPanel` level,
-   borderless, transparent, with shadow.
-3. If `cache == nil` (no warm cache yet), do a synchronous `shell()` call
-   to populate it before rendering.
+2. Compute screen geometry; build full-screen shield webviews plus the picker
+   webview at `modalPanel` level.
+3. If `cache == nil`, load the iTerm2 daemon cache first; if unavailable,
+   fall back to a synchronous fast collector call before rendering.
 4. Inject `__TREE_JSON__` placeholder; show webview; focus its window.
-5. Start the fast and full cache timers, then fire immediate async fast/full
-   refreshes.
+5. If the daemon cache is fresh, start a file watcher on it. Otherwise start
+   the fallback fast/full collector timers and fire immediate async refreshes.
 6. Start `hs.application.watcher` for auto-hide.
 
 ### Picker close
@@ -239,8 +237,9 @@ opaque `uid` for round-tripping back to `list-iterms focus`.
 Triggered by Esc in JS (`send('close')`), Enter or click on a session
 (implicit close after `focusUid`), or another app activating.
 
-`close()` stops the watcher, deletes the webview, clears the user content
-controller, stops the cache timer. Idle state restored.
+`close()` stops the app watcher, daemon file watcher, fallback timers, deletes
+the picker and shield webviews, and clears the user content controller. Idle
+state restored.
 
 ### Focus
 
@@ -317,7 +316,7 @@ There's no test harness. The fast feedback loop is:
 
 ```bash
 # In one terminal, watch JSON output:
-~/EXTRACTUM/xtermswitch/bin/list-iterms json | jq .
+./bin/list-iterms json | jq .
 
 # In Hammerspoon Console:
 hs.reload()              -- after editing xtermswitch.lua
@@ -338,7 +337,7 @@ emit JSON (run the bash script directly to see stderr).
 | `attempt to call a nil value (method '...')`   | Old code in the appWatcher callback — see invariant in §1.1    |
 | Hotkey doesn't fire                            | Conflict with another global hotkey; check `hs.hotkey.showHotkeys()` |
 | Webview opens behind the active app            | macOS Stage Manager interaction; reload Hammerspoon            |
-| Two `ssh -CC` tunnels open, virtuals show under "tmux-CC" placeholder | Not supported. `bin/list-iterms` only attributes a host to virtuals when exactly one tmux-CC controller is running (`cc_count == 1`). With multiple, virtual sessions still appear but are bundled under a generic `"tmux-CC"` group. |
+| Daemon cache not updating                      | iTerm2 Python API is disabled, iTerm2 has not restarted, or the AutoLaunch script has not run |
 
 ## Files written outside the project
 
@@ -363,4 +362,4 @@ Nothing else. No state under `~/.config`, no logs.
 
 ## License
 
-MIT.
+AGPL-3.0-or-later. Copyright (C) 2026 Gregory Zemskov <info@extractum.io>.

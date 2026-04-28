@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# xtermswitch — iTerm2 session switcher for Hammerspoon
+# Copyright (C) 2026 Gregory Zemskov <info@extractum.io>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
 # Usage:
 #   ~/list-iterms                  # YAML inventory of every iTerm2 session
 #   ~/list-iterms json [fast|full]  # flat JSON array (one entry per session) for chooser UIs
@@ -238,7 +242,7 @@ get_iterm_text() {
 cleanup_text_cache() {
   [ -n "$TEXT_DIR" ] && [ -d "$TEXT_DIR" ] && rm -rf "$TEXT_DIR"
 }
-trap cleanup_text_cache EXIT
+trap cleanup_text_cache EXIT INT TERM HUP
 
 # ---------- remote tmux-CC enrichment ----------
 declare -A REMOTE_PANE_CWD REMOTE_PANE_CMD REMOTE_PANE_AGENT REMOTE_PANE_LAST REMOTE_PANE_PROC REMOTE_PANE_ID

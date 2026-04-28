@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright (C) 2026 Gregory Zemskov <info@extractum.io>
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Event-based iTerm2 state cache for xtermswitch.
 
 Install through iTerm2's Scripts menu or symlink into:
@@ -167,6 +169,7 @@ class State:
         self.last_screen_update: dict[str, float] = {}
         self.pending_screen: dict[str, asyncio.Task] = {}
         self.pending_write: asyncio.Task | None = None
+        self.last_payload_key: str | None = None
 
     async def refresh_app(self) -> iterm2.App:
         if self.app is None:
@@ -175,18 +178,22 @@ class State:
             await self.app.async_refresh(self.connection)
         return self.app
 
-    async def snapshot_all(self) -> None:
+    async def snapshot_all(self, include_screen: bool = False) -> None:
         app = await self.refresh_app()
         seen: set[str] = set()
         for widx, window in enumerate(app.terminal_windows, start=1):
             for tidx, tab in enumerate(window.tabs, start=1):
                 for sidx, session in enumerate(tab.sessions, start=1):
                     seen.add(session.session_id)
-                    await self.update_session(session, window, tab, widx, tidx, sidx, include_screen=True)
+                    await self.update_session(session, window, tab, widx, tidx, sidx, include_screen=include_screen)
         for sid in list(self.sessions):
             if sid not in seen:
                 self.sessions.pop(sid, None)
                 self.custom_status.pop(sid, None)
+                self.last_screen_update.pop(sid, None)
+                pending = self.pending_screen.pop(sid, None)
+                if pending and not pending.done():
+                    pending.cancel()
         self.schedule_write()
 
     async def update_by_id(self, session_id: str, include_screen: bool = False) -> None:
@@ -324,14 +331,22 @@ class State:
 
     def write_cache(self) -> None:
         CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        sessions = sorted(
+            self.sessions.values(),
+            key=lambda item: (item.get("win", 0), item.get("tab", 0), item.get("sess", 0), item.get("uid", "")),
+        )
+        # Hash the content (sans updated_at) so a stream of identical
+        # screen-update events doesn't re-trigger Hammerspoon's file watcher
+        # and re-render the picker for nothing.
+        sessions_json = json.dumps(sessions, separators=(",", ":"), ensure_ascii=False, sort_keys=True)
+        if sessions_json == self.last_payload_key:
+            return
+        self.last_payload_key = sessions_json
         payload = {
             "version": 1,
             "source": "iterm2-python",
             "updated_at": now(),
-            "sessions": sorted(
-                self.sessions.values(),
-                key=lambda item: (item.get("win", 0), item.get("tab", 0), item.get("sess", 0), item.get("uid", "")),
-            ),
+            "sessions": sessions,
         }
         fd, tmp_name = tempfile.mkstemp(prefix=".sessions.", suffix=".json", dir=str(CACHE_PATH.parent))
         try:
@@ -365,6 +380,10 @@ async def main(connection: iterm2.Connection) -> None:
         if session_id:
             state.sessions.pop(session_id, None)
             state.custom_status.pop(session_id, None)
+            state.last_screen_update.pop(session_id, None)
+            pending = state.pending_screen.pop(session_id, None)
+            if pending and not pending.done():
+                pending.cancel()
             state.schedule_write()
         else:
             await state.snapshot_all()
@@ -377,7 +396,10 @@ async def main(connection: iterm2.Connection) -> None:
     async def custom_callback(_connection, notification):
         state.apply_custom_status(notification)
 
-    await state.snapshot_all()
+    # Initial snapshot pulls screen text so last_line/processing are populated
+    # immediately. Subsequent layout/focus snapshots skip the per-session
+    # screen RPC; screen_callback handles real screen changes.
+    await state.snapshot_all(include_screen=True)
     await iterm2.notifications.async_subscribe_to_new_session_notification(connection, session_callback)
     await iterm2.notifications.async_subscribe_to_terminate_session_notification(connection, terminate_callback)
     await iterm2.notifications.async_subscribe_to_layout_change_notification(connection, snapshot_callback)

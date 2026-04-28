@@ -1,5 +1,6 @@
 -- Sample ~/.hammerspoon/init.lua showing how to load xtermswitch.
--- Adjust the path if you cloned the repo somewhere other than ~/EXTRACTUM/.
+-- Adjust this path to wherever you cloned the repo.
+local xtermswitch = os.getenv("HOME") .. "/src/xtermswitch/xtermswitch.lua"
 
 -- Auto-reload Hammerspoon when any .lua in this dir changes.
 hs.pathwatcher.new(os.getenv("HOME") .. "/.hammerspoon/", function(files)
@@ -9,4 +10,4 @@ hs.pathwatcher.new(os.getenv("HOME") .. "/.hammerspoon/", function(files)
 end):start()
 
 -- xtermswitch — iTerm session switcher with hotkey.
-dofile(os.getenv("HOME") .. "/EXTRACTUM/xtermswitch/xtermswitch.lua")
+dofile(xtermswitch)
