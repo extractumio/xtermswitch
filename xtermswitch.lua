@@ -8,7 +8,9 @@
 -- See the LICENSE file at the project root for the full text.
 --
 -- Default install: clone the repo, then add to ~/.hammerspoon/init.lua:
---     dofile(os.getenv("HOME") .. "/src/xtermswitch/xtermswitch.lua")
+--     dofile("/absolute/path/to/xtermswitch/xtermswitch.lua")
+-- (install.sh writes this line for you using the absolute path of the
+-- checkout it was run from.)
 --
 -- User config (optional): ~/.xtermswitch/config.lua returning a table of
 -- overrides, e.g.:

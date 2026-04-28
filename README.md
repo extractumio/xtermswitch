@@ -10,26 +10,6 @@ preview of what's happening on screen. Hit Enter to jump there.
        width="525">
 </p>
 
-```
-                             ⌘⌥⌃T
-   ┌────────────────────────────────────────────────────────┐
-   │  Search sessions, hosts, paths…                        │
-   ├────────────────────────────────────────────────────────┤
-   │  LOCAL                                              5  │
-   │   iTerm 1                                              │
-   │     🖥  ~/src/xtermswitch         claude  ●            │
-   │     🖥  ~/work/billing-api        pytest               │
-   │   iTerm 2                                              │
-   │     🖥  ~/notes                   nvim                 │
-   │  SSH · prod-1                                       2  │
-   │     🌐 ~/services/api-gateway     tail -f              │
-   │  TMUX-CC · staging-2                                3  │
-   │     🪟 ~/repos/payments-svc      claude  ●            │
-   │     🪟 ~/repos/payments-svc      go test               │
-   │  ↑↓ navigate   ↵ focus   esc close                     │
-   └────────────────────────────────────────────────────────┘
-```
-
 ## Why
 
 If you live in 30+ terminal sessions across local windows, `ssh` shells, and
@@ -147,12 +127,14 @@ broken install.
 ## Install
 
 ```bash
-git clone https://github.com/extractumio/xtermswitch.git ~/src/xtermswitch
-~/src/xtermswitch/install.sh
+git clone https://github.com/extractumio/xtermswitch.git
+cd xtermswitch
+./install.sh
 ```
 
-You can clone into any directory; the installer records the absolute path to
-that checkout in `~/.hammerspoon/init.lua`.
+Clone into whatever directory you keep your code in — the installer records
+the absolute path of that checkout in `~/.hammerspoon/init.lua`, so xtermswitch
+runs from wherever you put it.
 
 The installer is idempotent. Re-running it updates the wiring for the current
 checkout and keeps existing user config intact. It:

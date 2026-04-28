@@ -1,6 +1,8 @@
 -- Sample ~/.hammerspoon/init.lua showing how to load xtermswitch.
--- Adjust this path to wherever you cloned the repo.
-local xtermswitch = os.getenv("HOME") .. "/src/xtermswitch/xtermswitch.lua"
+-- Replace the placeholder with the absolute path to your checkout.
+-- install.sh writes this line for you automatically; this file is here
+-- for reference when wiring things up by hand.
+local xtermswitch = "/absolute/path/to/xtermswitch/xtermswitch.lua"
 
 -- Auto-reload Hammerspoon when any .lua in this dir changes.
 hs.pathwatcher.new(os.getenv("HOME") .. "/.hammerspoon/", function(files)
